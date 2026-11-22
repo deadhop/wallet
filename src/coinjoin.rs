@@ -180,6 +180,9 @@ pub struct Round<'a> {
     pub pool_keys: Keys,
     pub creator: bool,
     pub network: Network,
+    /// When the pool was announced: every pool message is newer, whenever
+    /// this member started reading.
+    pub since: Timestamp,
 }
 
 /// Look for a pool to join; announce one when there is none.
@@ -215,6 +218,7 @@ pub async fn find_or_create<'a>(
                 pool_keys: keys,
                 creator: false,
                 network,
+                since: event.created_at,
             });
         }
     }
@@ -239,6 +243,7 @@ pub async fn find_or_create<'a>(
     )
     .sign_with_keys(&pool_keys)
     .map_err(err)?;
+    let since = announcement.created_at;
     board.publish(announcement).await?;
     tracing::info!(pool = %pool.id, peers = pool.peers, "announced a coinjoin pool");
     Ok(Round {
@@ -247,6 +252,7 @@ pub async fn find_or_create<'a>(
         pool_keys,
         creator: true,
         network,
+        since,
     })
 }
 
@@ -469,7 +475,8 @@ impl Round<'_> {
         address: &str,
         deadline: u64,
     ) -> Result<Transaction> {
-        let since = Timestamp::from(Timestamp::now().as_secs().saturating_sub(5));
+        // A little slack for clocks that disagree.
+        let since = Timestamp::from(self.since.as_secs().saturating_sub(60));
         let mut admitted = HashSet::new();
         let mut seen = Seen::default();
         self.post(json!({"address": address, "type": "output"})).await?;
@@ -580,6 +587,11 @@ async fn broadcast(s: &Sweeper, tx: &Transaction) -> Result<bitcoin::Txid> {
     }
 }
 
+/// Whether `coin` can go into a pool as it is.
+pub fn premix_ready(cj: &CoinjoinConfig, coin: &Coin) -> bool {
+    (cj.denomination_sat + MIN_EXCESS_SAT..=cj.denomination_sat + MAX_EXCESS_SAT).contains(&coin.value.to_sat())
+}
+
 /// A CoinJoin sweep: premix if needed, then one round.
 pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Result<Sweep> {
     let cj = s
@@ -587,8 +599,7 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
         .coinjoin
         .clone()
         .ok_or_else(|| Error::Config("coinjoin mode needs its settings".into()))?;
-    let range = cj.denomination_sat + MIN_EXCESS_SAT..=cj.denomination_sat + MAX_EXCESS_SAT;
-    let Some(coin) = coins.iter().find(|c| range.contains(&c.value.to_sat())).cloned() else {
+    let Some(coin) = coins.iter().find(|c| premix_ready(&cj, c)).cloned() else {
         return premix(s, &cj, coins, rate, now).await;
     };
     let client = deadhop::relay::Pool::new(Keys::generate(), s.cfg.proxy.clone());
@@ -718,7 +729,11 @@ pub(crate) mod tests {
         let (a, b, d) = tokio::join!(
             take_part(creator, &members[0].0, &members[0].1, &dests[0], now + 120),
             join_and_take_part(&board, &c, now, &members[1].0, &members[1].1, &dests[1]),
-            join_and_take_part(&board, &c, now, &members[2].0, &members[2].1, &dests[2]),
+            // The last member starts long after the others registered.
+            async {
+                tokio::time::sleep(Duration::from_secs(8)).await;
+                join_and_take_part(&board, &c, now, &members[2].0, &members[2].1, &dests[2]).await
+            },
         );
         let txs = [a.unwrap(), b.unwrap(), d.unwrap()];
         assert!(

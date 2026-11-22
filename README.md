@@ -48,7 +48,7 @@ The sweeping wallet. It is a separate binary and container from the payment serv
 | `DEADHOP_WALLET_STATE_DIR` | the data directory | Where `sweeper.json` is kept (must be writable) |
 | `DEADHOP_ELECTRUM`, `DEADHOP_ELECTRUM_CERT_SHA256` | none | As for the payment service. Required to sweep |
 | `DEADHOP_WALLET_MODE` | `send` | `send`, `payjoin` or `coinjoin` |
-| `DEADHOP_WALLET_DESTINATION` | unset | Account key (`xpub`/`zpub`, `tpub`/`vpub`) of the wallet to move funds to. Unset: hold, sweep nothing, connect nowhere |
+| `DEADHOP_WALLET_DESTINATION` | unset | Account key (`xpub`/`zpub`, `tpub`/`vpub`) of the wallet to move funds to. With nothing to sweep to (no destination, and in payjoin mode no URI file) the process holds: it reads no key and connects nowhere |
 | `DEADHOP_WALLET_THRESHOLD_SAT` | `1000000` | Confirmed balance that triggers a sweep (at least 10,000) |
 | `DEADHOP_WALLET_MAX_FEE_RATE` | `20` | Highest fee rate in sat/vB. Above it, the sweep waits |
 | `DEADHOP_WALLET_FEE_TARGET_BLOCKS` | `6` | Confirmation target asked of the server's fee estimate |
@@ -56,7 +56,7 @@ The sweeping wallet. It is a separate binary and container from the payment serv
 | `DEADHOP_WALLET_POLL_SECS` | `300` | Time between polls |
 | `DEADHOP_WALLET_GAP` | `50` | Unused addresses scanned past the last used one |
 | `DEADHOP_WALLET_PROXY` | unset | `socks5://…` (e.g. Tor) for PayJoin requests and the CoinJoin relay. Needed for `.onion` endpoints |
-| `DEADHOP_WALLET_PAYJOIN_URI_FILE` | unset | `payjoin` mode: a file with the receiver's `bitcoin:…?pj=…` URI, without an amount. Write a fresh one for every sweep |
+| `DEADHOP_WALLET_PAYJOIN_URI_FILE` | unset | `payjoin` mode: a file with the receiver's `bitcoin:…?pj=…` URI, without an amount. Write a fresh one for every sweep. It decides where the whole balance goes: keep it on the host and mount it read-only |
 | `DEADHOP_WALLET_PAYJOIN_CERT_SHA256` | unset | Pin the receiver's certificate (self-hosted receivers) |
 | `DEADHOP_WALLET_COINJOIN_RELAY` | unset | `coinjoin` mode: the one relay pools use |
 | `DEADHOP_WALLET_COINJOIN_DENOMINATION_SAT` | `1000000` | Amount each peer mixes. The threshold must be at least this plus 500 |
@@ -67,6 +67,9 @@ Commands: `deadhop-wallet run` (the default: poll until stopped), `deadhop-walle
 poll) and `deadhop-wallet status` (recent sweeps).
 
 ## What happens when something fails
+
+- **Many coins:** at most 400 inputs go into one transaction, largest first, and a coin worth
+  less than the fee of its own input is left alone. The rest is swept by the next poll.
 
 - **Fees above the cap, no fresh PayJoin URI, a CoinJoin round that does not fill:** the
   balance stays where it is, and the next poll tries again.
@@ -87,6 +90,8 @@ poll) and `deadhop-wallet status` (recent sweeps).
   Kotlin clients has not been tested. Rounds have only been run between deadhop wallets.
 - **PayJoin version:** PayJoin is BIP-78 (v1) only, with no BIP-77 directory or OHTTP.
 - **Script type:** only P2WPKH (BIP-84) coins.
+- **No CoinJoin fallback:** without enough peers, rounds keep being abandoned. The premix coin
+  stays in the wallet and nothing leaves until a round fills, or you switch the mode.
 
 ## Tests
 

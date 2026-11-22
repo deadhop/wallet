@@ -14,11 +14,19 @@ use crate::error::Result;
 use crate::keys::{Keys, EXTERNAL, INTERNAL};
 use crate::tx::Coin;
 
+/// Highest index taken from the payment service's file. That file comes
+/// from the internet-facing service, so a value beyond any real use (the
+/// daily invoice cap allows 2000 a day) is not believed in full.
+pub const MAX_INDEX_HINT: u32 = 10_000_000;
+/// Addresses asked about per round trip of the scan.
+const SCAN_CHUNK: u32 = 1_000;
+
 /// The payment service's next unused index, or 0 when it has not said.
 pub fn read_index(file: Option<&Path>) -> u32 {
     file.and_then(|f| std::fs::read_to_string(f).ok())
-        .and_then(|t| t.trim().parse().ok())
+        .and_then(|t| t.trim().parse::<u32>().ok())
         .unwrap_or(0)
+        .min(MAX_INDEX_HINT)
 }
 
 /// Result of a scan.
@@ -39,7 +47,7 @@ async fn used_indices(chain: &dyn Backend, keys: &Keys, branch: u32, floor: u32,
     let mut scanned = 0u32;
     let mut until = floor.saturating_add(gap);
     while scanned < until {
-        let range: Vec<u32> = (scanned..until).collect();
+        let range: Vec<u32> = (scanned..until.min(scanned.saturating_add(SCAN_CHUNK))).collect();
         let scripts: Vec<_> = range.iter().map(|i| keys.script(branch, *i)).collect();
         for (i, u) in range.iter().zip(chain.used(&scripts).await?) {
             if u {
@@ -134,6 +142,8 @@ mod tests {
         assert_eq!(read_index(Some(&f)), 42);
         std::fs::write(&f, "x").unwrap();
         assert_eq!(read_index(Some(&f)), 0);
+        std::fs::write(&f, "4000000000").unwrap();
+        assert_eq!(read_index(Some(&f)), MAX_INDEX_HINT);
 
         let k = keys();
         let mut c = crate::tx::tests::coin(&k, 0, 1, 1);

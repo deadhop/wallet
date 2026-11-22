@@ -32,6 +32,20 @@ pub struct Sweeper {
     destination: Option<Watch>,
 }
 
+/// Most inputs in one transaction: about 30,000 vbytes, well inside the
+/// standard size limit. The rest is swept by the next poll.
+pub const MAX_INPUTS: usize = 400;
+
+/// The coins worth spending at `rate`, largest first, at most [`MAX_INPUTS`].
+/// A coin worth less than the fee of its own input would only lose money.
+pub fn spendable(mut coins: Vec<Coin>, rate: f64) -> Vec<Coin> {
+    let input_fee = tx::fee(tx::P2WPKH_INPUT_WEIGHT.div_ceil(4), rate);
+    coins.retain(|c| c.value > input_fee);
+    coins.sort_by_key(|c| std::cmp::Reverse(c.value));
+    coins.truncate(MAX_INPUTS);
+    coins
+}
+
 /// Coins by outpoint, for the signer.
 pub fn index(coins: &[Coin]) -> Coins {
     coins.iter().map(|c| (c.outpoint, c.clone())).collect()
@@ -116,7 +130,14 @@ impl Sweeper {
             .partition(|c| confirmed(c, tip, self.cfg.min_confirmations));
         let balance: Amount = ready.iter().map(|c| c.value).sum();
         let unconfirmed: Amount = pending.iter().map(|c| c.value).sum();
-        if balance.to_sat() < self.cfg.threshold_sat {
+        // A confirmed premix coin is due whatever the balance: the premix fee
+        // may have left the rest just under the threshold.
+        let premixed = self
+            .cfg
+            .coinjoin
+            .as_ref()
+            .is_some_and(|cj| ready.iter().any(|c| crate::coinjoin::premix_ready(cj, c)));
+        if balance.to_sat() < self.cfg.threshold_sat && !premixed {
             return Ok(Outcome::Below {
                 confirmed: balance,
                 unconfirmed,
@@ -128,6 +149,7 @@ impl Sweeper {
                 why: format!("fees are above the cap of {} sat/vB", self.cfg.max_fee_rate),
             });
         };
+        let ready = spendable(ready, rate);
         let done = match self.cfg.mode {
             Mode::Send => self.send(&ready, rate, now).await,
             Mode::Payjoin => crate::payjoin::sweep(self, &ready, rate, now).await,
@@ -314,6 +336,21 @@ pub(crate) mod tests {
         let (mut s, _) = sweeper(dir.path(), chain, &[]);
         assert!(s.tick(1).await.is_err());
         assert_eq!(s.state.next_destination, 0);
+    }
+
+    #[test]
+    fn dust_is_left_and_inputs_are_capped() {
+        let k = keys();
+        let coins: Vec<Coin> = (0..(MAX_INPUTS as u32 + 10))
+            .map(|i| crate::tx::tests::coin(&k, i, 1_000 + u64::from(i), (i % 250) as u8))
+            .chain([crate::tx::tests::coin(&k, 0, 50, 251)])
+            .collect();
+        let picked = spendable(coins, 2.0);
+        assert_eq!(picked.len(), MAX_INPUTS);
+        assert!(
+            picked.iter().all(|c| c.value.to_sat() >= 1_010),
+            "the largest, and never the dust"
+        );
     }
 
     #[test]

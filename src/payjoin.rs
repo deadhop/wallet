@@ -260,14 +260,20 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
         Ok(body) => finish(s, &body, ctx, coins, &original_tx),
         Err(e) => Err(e),
     };
-    let (tx, mode) = match attempt {
-        Ok(tx) => (tx, Mode::Payjoin.label().to_string()),
+    // The PayJoin, if the receiver's proposal passed and the network takes
+    // it; otherwise the Original.
+    let joined = match attempt {
+        Ok(tx) => s.chain.broadcast(&tx).await.map(|txid| (tx, txid)),
+        Err(e) => Err(e),
+    };
+    let (tx, txid, mode) = match joined {
+        Ok((tx, txid)) => (tx, txid, Mode::Payjoin.label().to_string()),
         Err(e) => {
             tracing::warn!(error = %e, "payjoin failed, broadcasting the original payment instead");
-            (original_tx, "payjoin-fallback".to_string())
+            let txid = s.chain.broadcast(&original_tx).await?;
+            (original_tx, txid, "payjoin-fallback".to_string())
         }
     };
-    let txid = s.chain.broadcast(&tx).await?;
     let moved = tx
         .output
         .iter()

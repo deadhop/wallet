@@ -108,18 +108,18 @@ async fn main(args: &[String], cfg: Config, shutdown: impl Future<Output = ()>) 
             }
             Ok(())
         }
+        None | Some("run") | Some("once") if !cfg.sweeps() => {
+            // The phrase is not even read: nothing here needs it.
+            tracing::info!(
+                "holding: no destination is set, so nothing is swept, no key is read and no connection is made"
+            );
+            if args.first().map(String::as_str) != Some("once") {
+                shutdown.await;
+            }
+            Ok(())
+        }
         None | Some("run") | Some("once") => {
             let keys = open_keys(&cfg)?;
-            if !cfg.sweeps() {
-                let key = keys.account_key();
-                tracing::info!(
-                    "holding the funds of {key}: no destination is set, so nothing is swept and no connection is made"
-                );
-                if args.first().map(String::as_str) != Some("once") {
-                    shutdown.await;
-                }
-                return Ok(());
-            }
             let (mode, threshold) = (cfg.mode.label(), cfg.threshold_sat);
             tracing::info!("sweeping by {mode} once {threshold} sat are confirmed");
             let mut s = sweeper(cfg, keys)?;
@@ -212,7 +212,13 @@ mod tests {
     #[tokio::test]
     async fn refuses_a_phrase_that_is_not_the_watched_wallet() {
         let dir = wallet_dir();
-        let m = vars(dir.path(), &[]);
+        let m = vars(
+            dir.path(),
+            &[
+                ("DEADHOP_ELECTRUM", "127.0.0.1:1".into()),
+                ("DEADHOP_WALLET_DESTINATION", crate::keys::tests::keys().account_key()),
+            ],
+        );
         std::fs::write(dir.path().join("account.xpub"), crate::sweep::tests::other_account()).unwrap();
         assert_eq!(cmd(&["once"], &m).await, ExitCode::FAILURE);
         let gone = Config::from_env(&|k| {
