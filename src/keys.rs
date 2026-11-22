@@ -34,17 +34,12 @@ impl Keys {
     /// Keys of a recovery phrase (no passphrase), BIP-84 account 0.
     pub fn from_phrase(phrase: &Mnemonic, network: Network) -> Self {
         let secp = Secp256k1::new();
-        let master = Xpriv::new_master(network, &phrase.to_seed(""))
-            .expect("a 64-byte seed is a valid master key");
+        let master = Xpriv::new_master(network, &phrase.to_seed("")).expect("a 64-byte seed is a valid master key");
         let path = DerivationPath::from_str(account_path(network)).expect("constant path");
         let account = master
             .derive_priv(&secp, &path)
             .expect("hardened derivation from a valid key");
-        Keys {
-            secp,
-            account,
-            network,
-        }
+        Keys { secp, account, network }
     }
 
     /// Read the phrase in `dir`. Never creates one.
@@ -57,12 +52,8 @@ impl Keys {
                 path.display()
             ))
         })?;
-        let phrase = Mnemonic::parse(text.trim()).map_err(|_| {
-            Error::Config(format!(
-                "{} does not contain a BIP-39 recovery phrase",
-                path.display()
-            ))
-        })?;
+        let phrase = Mnemonic::parse(text.trim())
+            .map_err(|_| Error::Config(format!("{} does not contain a BIP-39 recovery phrase", path.display())))?;
         Ok(Self::from_phrase(&phrase, network))
     }
 
@@ -80,11 +71,7 @@ impl Keys {
         let published = published.trim();
         let ours = Wallet::new(&self.account_key(), self.network)?.account_id();
         let theirs = Wallet::new(published, self.network)
-            .map_err(|_| {
-                Error::Config(
-                    "the published account key is not a valid key for this network".into(),
-                )
-            })?
+            .map_err(|_| Error::Config("the published account key is not a valid key for this network".into()))?
             .account_id();
         if ours != theirs {
             return Err(Error::Config(
@@ -100,10 +87,7 @@ impl Keys {
             .account
             .derive_priv(
                 &self.secp,
-                &[
-                    ChildNumber::Normal { index: chain },
-                    ChildNumber::Normal { index },
-                ],
+                &[ChildNumber::Normal { index: chain }, ChildNumber::Normal { index }],
             )
             .expect("non-hardened derivation from a valid key");
         child.to_priv()
@@ -136,7 +120,8 @@ pub(crate) mod tests {
     use deadhop::wallet::account_from_phrase;
     use std::os::unix::fs::PermissionsExt;
 
-    pub const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    pub const PHRASE: &str =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     pub fn keys() -> Keys {
         Keys::from_phrase(&Mnemonic::parse(PHRASE).unwrap(), Network::Regtest)
@@ -147,10 +132,7 @@ pub(crate) mod tests {
         let phrase = Mnemonic::parse(PHRASE).unwrap();
         for network in [Network::Bitcoin, Network::Regtest] {
             let k = Keys::from_phrase(&phrase, network);
-            assert_eq!(
-                k.account_key(),
-                encode_account(&account_from_phrase(&phrase, network))
-            );
+            assert_eq!(k.account_key(), encode_account(&account_from_phrase(&phrase, network)));
             let w = Wallet::new(&k.account_key(), network).unwrap();
             assert_eq!(w.address(3).unwrap(), k.address(EXTERNAL, 3));
             assert_eq!(k.network(), network);
@@ -161,25 +143,15 @@ pub(crate) mod tests {
             k.address(EXTERNAL, 0).to_string(),
             "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
         );
-        assert_eq!(
-            k.script(INTERNAL, 0),
-            k.address(INTERNAL, 0).script_pubkey()
-        );
+        assert_eq!(k.script(INTERNAL, 0), k.address(INTERNAL, 0).script_pubkey());
     }
 
     #[test]
     fn the_published_key_must_match() {
         let k = keys();
-        k.check_published(&format!("{}\n", k.account_key()))
-            .unwrap();
-        let other = Keys::from_phrase(
-            &Mnemonic::from_entropy(&[7u8; 32]).unwrap(),
-            Network::Regtest,
-        );
-        let e = k
-            .check_published(&other.account_key())
-            .unwrap_err()
-            .to_string();
+        k.check_published(&format!("{}\n", k.account_key())).unwrap();
+        let other = Keys::from_phrase(&Mnemonic::from_entropy(&[7u8; 32]).unwrap(), Network::Regtest);
+        let e = k.check_published(&other.account_key()).unwrap_err().to_string();
         assert!(e.contains("does not belong"), "{e}");
         let e = k.check_published("nonsense").unwrap_err().to_string();
         assert!(e.contains("not a valid key"), "{e}");
@@ -188,20 +160,14 @@ pub(crate) mod tests {
     #[test]
     fn loads_but_never_creates_a_phrase() {
         let dir = tempfile::tempdir().unwrap();
-        let e = Keys::load(dir.path(), Network::Regtest)
-            .err()
-            .unwrap()
-            .to_string();
+        let e = Keys::load(dir.path(), Network::Regtest).err().unwrap().to_string();
         assert!(e.contains("never creates"), "{e}");
         assert!(!dir.path().join(PHRASE_FILE).exists());
 
         let path = dir.path().join(PHRASE_FILE);
         std::fs::write(&path, "not words").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let e = Keys::load(dir.path(), Network::Regtest)
-            .err()
-            .unwrap()
-            .to_string();
+        let e = Keys::load(dir.path(), Network::Regtest).err().unwrap().to_string();
         assert!(e.contains("BIP-39"), "{e}");
 
         std::fs::write(&path, format!("{PHRASE}\n")).unwrap();

@@ -1,0 +1,8 @@
+# Only the two crates' sources go into the build context.
+*
+!server/Cargo.toml
+!server/Cargo.lock
+!server/src
+!wallet/Cargo.toml
+!wallet/Cargo.lock
+!wallet/src

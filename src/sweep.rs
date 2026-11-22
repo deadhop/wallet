@@ -17,10 +17,7 @@ use crate::tx::{self, Coin, Coins, Rules};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     /// Below the threshold: nothing to do.
-    Below {
-        confirmed: Amount,
-        unconfirmed: Amount,
-    },
+    Below { confirmed: Amount, unconfirmed: Amount },
     /// Due, but not now (fees above the cap, no fresh PayJoin URI, no peers...).
     Waiting { confirmed: Amount, why: String },
     /// Moved out.
@@ -47,8 +44,7 @@ impl Sweeper {
                 let w = Watch::new(d, cfg.network)?;
                 if w.account_id() == Watch::new(&keys.account_key(), cfg.network)?.account_id() {
                     return Err(Error::Config(
-                        "DEADHOP_WALLET_DESTINATION is this wallet itself: name another wallet"
-                            .into(),
+                        "DEADHOP_WALLET_DESTINATION is this wallet itself: name another wallet".into(),
                     ));
                 }
                 Some(w)
@@ -106,8 +102,9 @@ impl Sweeper {
             self.cfg.gap,
         )
         .await?;
-        for s in &found.skipped {
-            tracing::warn!("skipped {s}");
+        if !found.skipped.is_empty() {
+            let skipped = found.skipped.join("; ");
+            tracing::warn!(%skipped, "addresses skipped");
         }
         // Change addresses found in use (e.g. after restoring the state file)
         // are never handed out again.
@@ -132,23 +129,18 @@ impl Sweeper {
             });
         };
         let done = match self.cfg.mode {
-            Mode::Send => self.send(&ready, rate, now).await.map(Some),
+            Mode::Send => self.send(&ready, rate, now).await,
             Mode::Payjoin => crate::payjoin::sweep(self, &ready, rate, now).await,
             Mode::Coinjoin => crate::coinjoin::sweep(self, &ready, rate, now).await,
         };
+        // Saved whatever happened: a failed attempt can still have used up a
+        // PayJoin URI or a change address.
+        if let Ok(sweep) = &done {
+            self.state.record(sweep.clone());
+        }
+        self.save()?;
         match done {
-            Ok(Some(sweep)) => {
-                self.state.record(sweep.clone());
-                self.save()?;
-                Ok(Outcome::Swept(sweep))
-            }
-            Ok(None) => {
-                self.save()?;
-                Ok(Outcome::Waiting {
-                    confirmed: balance,
-                    why: "the sweep is not possible yet".into(),
-                })
-            }
+            Ok(sweep) => Ok(Outcome::Swept(sweep)),
             Err(e @ (Error::Payjoin(_) | Error::Coinjoin(_))) => Ok(Outcome::Waiting {
                 confirmed: balance,
                 why: e.to_string(),
@@ -168,13 +160,7 @@ impl Sweeper {
             min_to: total - fee,
             max_cost: self.max_fee(coins.len(), &[&dest]),
         };
-        tx::sign(
-            &mut psbt,
-            &self.keys,
-            &index(coins),
-            &rules,
-            EcdsaSighashType::All,
-        )?;
+        tx::sign(&mut psbt, &self.keys, &index(coins), &rules, EcdsaSighashType::All)?;
         let tx = tx::extract(psbt);
         let txid = self.chain.broadcast(&tx).await?;
         self.state.next_destination += 1;
@@ -212,10 +198,7 @@ pub(crate) mod tests {
             ("DEADHOP_ELECTRUM", "127.0.0.1:1".into()),
             ("DEADHOP_WALLET_DESTINATION", other_account()),
             ("DEADHOP_WALLET_THRESHOLD_SAT", "100000".into()),
-            (
-                "DEADHOP_WALLET_STATE_DIR",
-                dir.to_string_lossy().into_owned(),
-            ),
+            ("DEADHOP_WALLET_STATE_DIR", dir.to_string_lossy().into_owned()),
         ]);
         for (k, v) in extra {
             m.insert(k, v.clone());
@@ -252,24 +235,15 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn sweeper(
-        dir: &std::path::Path,
-        chain: FakeChain,
-        extra: &[(&'static str, String)],
-    ) -> (Sweeper, Shared) {
+    pub fn sweeper(dir: &std::path::Path, chain: FakeChain, extra: &[(&'static str, String)]) -> (Sweeper, Shared) {
         let shared = Shared(Arc::new(chain));
-        let s = Sweeper::new(
-            config(dir, extra),
-            keys(),
-            Box::new(shared.clone()),
-            State::default(),
-        )
-        .unwrap();
+        let s = Sweeper::new(config(dir, extra), keys(), Box::new(shared.clone()), State::default()).unwrap();
         (s, shared)
     }
 
     #[tokio::test]
     async fn sweeps_once_the_confirmed_balance_reaches_the_threshold() {
+        crate::test_logs();
         let dir = tempfile::tempdir().unwrap();
         let k = keys();
         let chain = FakeChain {
@@ -280,19 +254,15 @@ pub(crate) mod tests {
         chain.fund(&k.script(EXTERNAL, 0), 60_000, Some(100));
         chain.fund(&k.script(EXTERNAL, 1), 70_000, None);
         let (mut s, shared) = sweeper(dir.path(), chain, &[]);
-        match s.tick(1).await.unwrap() {
-            Outcome::Below {
-                confirmed,
-                unconfirmed,
-            } => {
-                assert_eq!((confirmed.to_sat(), unconfirmed.to_sat()), (60_000, 70_000));
-            }
-            other => panic!("{other:?}"),
-        }
-        shared.0.fund(&k.script(EXTERNAL, 2), 50_000, Some(99));
-        let Outcome::Swept(sweep) = s.tick(2).await.unwrap() else {
-            panic!("not swept")
+        let below = Outcome::Below {
+            confirmed: Amount::from_sat(60_000),
+            unconfirmed: Amount::from_sat(70_000),
         };
+        assert_eq!(s.tick(1).await.unwrap(), below);
+        shared.0.fund(&k.script(EXTERNAL, 2), 50_000, Some(99));
+        // A dusted address is skipped (and logged); the rest is still swept.
+        shared.0.poisoned.lock().unwrap().insert(k.script(EXTERNAL, 1));
+        let Outcome::Swept(sweep) = s.tick(2).await.unwrap() else { panic!("not swept") };
         assert_eq!(sweep.spent_sat, 110_000);
         assert_eq!(sweep.mode, "send");
         let sent = shared.0.broadcasts.lock().unwrap()[0].clone();
@@ -349,29 +319,15 @@ pub(crate) mod tests {
     #[test]
     fn sweeping_to_itself_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config(
-            dir.path(),
-            &[("DEADHOP_WALLET_DESTINATION", keys().account_key())],
-        );
-        let e = Sweeper::new(
-            cfg,
-            keys(),
-            Box::new(FakeChain::default()),
-            State::default(),
-        )
-        .err()
-        .unwrap()
-        .to_string();
+        let cfg = config(dir.path(), &[("DEADHOP_WALLET_DESTINATION", keys().account_key())]);
+        let e = Sweeper::new(cfg, keys(), Box::new(FakeChain::default()), State::default())
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("itself"), "{e}");
         let mut cfg = config(dir.path(), &[]);
         cfg.destination = None;
-        let s = Sweeper::new(
-            cfg,
-            keys(),
-            Box::new(FakeChain::default()),
-            State::default(),
-        )
-        .unwrap();
+        let s = Sweeper::new(cfg, keys(), Box::new(FakeChain::default()), State::default()).unwrap();
         assert!(s.destination().is_err());
     }
 }

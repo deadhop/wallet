@@ -34,13 +34,7 @@ pub struct Found {
 
 /// Indices of `chain` from 0, at least `floor` of them, extended until `gap`
 /// unused ones follow the last used. Returns the used indices.
-async fn used_indices(
-    chain: &dyn Backend,
-    keys: &Keys,
-    branch: u32,
-    floor: u32,
-    gap: u32,
-) -> Result<Vec<u32>> {
+async fn used_indices(chain: &dyn Backend, keys: &Keys, branch: u32, floor: u32, gap: u32) -> Result<Vec<u32>> {
     let mut used = Vec::new();
     let mut scanned = 0u32;
     let mut until = floor.saturating_add(gap);
@@ -76,11 +70,7 @@ pub async fn scan(
             found.used_internal = high;
         }
         let scripts: Vec<_> = used.iter().map(|i| keys.script(branch, *i)).collect();
-        for ((index, script), list) in used
-            .iter()
-            .zip(&scripts)
-            .zip(chain.unspent(&scripts).await?)
-        {
+        for ((index, script), list) in used.iter().zip(&scripts).zip(chain.unspent(&scripts).await?) {
             match list {
                 Ok(list) => found.coins.extend(list.into_iter().map(|u| Coin {
                     outpoint: u.outpoint,
@@ -90,9 +80,7 @@ pub async fn scan(
                     script: script.clone(),
                     height: u.height,
                 })),
-                Err(why) => found
-                    .skipped
-                    .push(format!("{}: {why}", keys.address(branch, *index))),
+                Err(why) => found.skipped.push(format!("{}: {why}", keys.address(branch, *index))),
             }
         }
     }
@@ -124,14 +112,16 @@ mod tests {
         let found = scan(&chain, &k, 401, 0, 20).await.unwrap();
         assert_eq!(found.coins.len(), 3);
         assert_eq!((found.used_external, found.used_internal), (401, 3));
-        assert!(found
-            .coins
-            .iter()
-            .any(|c| c.index == 400 && c.chain == EXTERNAL));
+        assert!(found.coins.iter().any(|c| c.index == 400 && c.chain == EXTERNAL));
         // A used address past the hint extends the scan by another gap.
         chain.fund(&k.script(EXTERNAL, 415), 1, Some(1));
         chain.fund(&k.script(EXTERNAL, 430), 1, Some(1));
         assert_eq!(scan(&chain, &k, 401, 0, 20).await.unwrap().coins.len(), 5);
+        // A dusted address is skipped and named, the rest still found.
+        chain.poisoned.lock().unwrap().insert(k.script(EXTERNAL, 3));
+        let found = scan(&chain, &k, 401, 0, 20).await.unwrap();
+        assert_eq!(found.coins.len(), 4);
+        assert!(found.skipped[0].contains(&k.address(EXTERNAL, 3).to_string()));
     }
 
     #[test]

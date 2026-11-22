@@ -148,10 +148,7 @@ pub fn check(psbt: &Psbt, ours: &Coins, rules: &Rules) -> Result<()> {
             script_pubkey: coin.script.clone(),
         };
         if input.witness_utxo.as_ref() != Some(&expected) {
-            return refuse(format!(
-                "input {} does not describe our coin",
-                txin.previous_output
-            ));
+            return refuse(format!("input {} does not describe our coin", txin.previous_output));
         }
         spent += coin.value;
     }
@@ -165,10 +162,7 @@ pub fn check(psbt: &Psbt, ours: &Coins, rules: &Rules) -> Result<()> {
         .map(|o| o.value)
         .sum();
     if to < rules.min_to {
-        return refuse(format!(
-            "only {to} reaches the destination, {} expected",
-            rules.min_to
-        ));
+        return refuse(format!("only {to} reaches the destination, {} expected", rules.min_to));
     }
     let cost = spent.checked_sub(to).unwrap_or(Amount::ZERO);
     if cost > rules.max_cost {
@@ -182,13 +176,7 @@ pub fn check(psbt: &Psbt, ours: &Coins, rules: &Rules) -> Result<()> {
 
 /// Check, then sign and finalize every input of `psbt` spending one of `ours`.
 /// Returns how many inputs were signed.
-pub fn sign(
-    psbt: &mut Psbt,
-    keys: &Keys,
-    ours: &Coins,
-    rules: &Rules,
-    sighash: EcdsaSighashType,
-) -> Result<usize> {
+pub fn sign(psbt: &mut Psbt, keys: &Keys, ours: &Coins, rules: &Rules, sighash: EcdsaSighashType) -> Result<usize> {
     check(psbt, ours, rules)?;
     let mut cache = SighashCache::new(psbt.unsigned_tx.clone());
     let mut signed = 0;
@@ -196,9 +184,11 @@ pub fn sign(
         let Some(coin) = ours.get(&txin.previous_output) else {
             continue;
         };
+        // Cannot fail: the index is in range and the coin is P2WPKH.
         let hash = cache
             .p2wpkh_signature_hash(i, &coin.script, coin.value, sighash)
-            .map_err(|e| Error::Policy(format!("cannot sign input {i}: {e}")))?;
+            .ok()
+            .ok_or(Error::Policy(format!("cannot sign input {i}")))?;
         let key = keys.private(coin.chain, coin.index);
         let msg = bitcoin::secp256k1::Message::from_digest(hash.to_byte_array());
         let sig = Signature {
@@ -206,10 +196,7 @@ pub fn sign(
             sighash_type: sighash,
         };
         let input = &mut psbt.inputs[i];
-        input.final_script_witness = Some(Witness::p2wpkh(
-            &sig,
-            &keys.public(coin.chain, coin.index).0,
-        ));
+        input.final_script_witness = Some(Witness::p2wpkh(&sig, &keys.public(coin.chain, coin.index).0));
         input.final_script_sig = Some(ScriptBuf::new());
         input.partial_sigs.clear();
         input.sighash_type = Some(sighash.into());
@@ -263,22 +250,13 @@ pub(crate) mod tests {
             min_to: Amount::from_sat(120_000) - fee,
             max_cost: fee,
         };
-        assert_eq!(
-            sign(&mut psbt, &k, &ours, &rules, EcdsaSighashType::All).unwrap(),
-            2
-        );
+        assert_eq!(sign(&mut psbt, &k, &ours, &rules, EcdsaSighashType::All).unwrap(), 2);
         let tx = extract(psbt);
         // The estimate allows the largest signature, so it is never below the real size.
         let real = tx.vsize() as u64;
-        assert!(
-            real <= vsize(2, &[&dest]) && real + 2 >= vsize(2, &[&dest]),
-            "{real}"
-        );
+        assert!(real <= vsize(2, &[&dest]) && real + 2 >= vsize(2, &[&dest]), "{real}");
         assert_eq!(tx.output[0].value, Amount::from_sat(120_000) - fee);
-        assert!(tx
-            .input
-            .iter()
-            .all(|i| i.sequence == Sequence::ENABLE_RBF_NO_LOCKTIME));
+        assert!(tx.input.iter().all(|i| i.sequence == Sequence::ENABLE_RBF_NO_LOCKTIME));
     }
 
     #[test]
@@ -305,11 +283,7 @@ pub(crate) mod tests {
             min_to: Amount::from_sat(min),
             max_cost: Amount::from_sat(cost),
         };
-        let err = |psbt: &mut Psbt, r: &Rules| {
-            sign(psbt, &k, &ours, r, EcdsaSighashType::All)
-                .unwrap_err()
-                .to_string()
-        };
+        let err = |psbt: &mut Psbt, r: &Rules| sign(psbt, &k, &ours, r, EcdsaSighashType::All).unwrap_err().to_string();
 
         // Paying someone else.
         let (mut p, _) = sweep(&refs, &thief, 1.0).unwrap();
@@ -324,16 +298,10 @@ pub(crate) mod tests {
         assert!(err(&mut p, &rules(1, 1000)).contains("does not describe"));
         // Not ours at all.
         let (mut p, _) = sweep(&refs, &dest, 1.0).unwrap();
-        assert!(sign(
-            &mut p,
-            &k,
-            &Coins::new(),
-            &rules(1, 1000),
-            EcdsaSighashType::All
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("none of our coins"));
+        assert!(sign(&mut p, &k, &Coins::new(), &rules(1, 1000), EcdsaSighashType::All)
+            .unwrap_err()
+            .to_string()
+            .contains("none of our coins"));
         // Malformed.
         let (mut p, _) = sweep(&refs, &dest, 1.0).unwrap();
         p.inputs.push(Input::default());

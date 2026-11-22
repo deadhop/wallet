@@ -50,6 +50,9 @@ pub struct CoinjoinConfig {
 /// Everything the wallet reads at start.
 pub struct Config {
     pub network: Network,
+    /// `DEADHOP_XPUB` is set: the keys of that wallet are elsewhere, so this
+    /// process only says so and waits.
+    pub own_xpub: bool,
     /// Holds the recovery phrase; only read.
     pub data_dir: PathBuf,
     /// The account key the payment service watches; must match the phrase.
@@ -92,32 +95,20 @@ pub mod bounds {
 
 impl Config {
     pub fn from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Config> {
-        let get = |k: &str| {
-            lookup(k)
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
+        let get = |k: &str| lookup(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         let num = |k: &str, default: u64, (lo, hi): (u64, u64)| -> Result<u64> {
             let Some(v) = get(k) else { return Ok(default) };
             v.parse::<u64>()
                 .ok()
                 .filter(|n| (lo..=hi).contains(n))
-                .ok_or_else(|| {
-                    Error::Config(format!("{k} must be a whole number from {lo} to {hi}"))
-                })
+                .ok_or_else(|| Error::Config(format!("{k} must be a whole number from {lo} to {hi}")))
         };
         let network = parse_network(&get("DEADHOP_NETWORK").unwrap_or("bitcoin".into()))?;
         let data_dir = PathBuf::from(get("DEADHOP_DATA_DIR").unwrap_or("data".into()));
-        let xpub_file =
-            get("DEADHOP_XPUB_FILE").map_or(data_dir.join("account.xpub"), PathBuf::from);
+        let xpub_file = get("DEADHOP_XPUB_FILE").map_or(data_dir.join("account.xpub"), PathBuf::from);
         let state_dir = get("DEADHOP_WALLET_STATE_DIR").map_or(data_dir.clone(), PathBuf::from);
-        if get("DEADHOP_XPUB").is_some() {
-            return Err(Error::Config(
-                "DEADHOP_XPUB is set: the keys of that wallet are not on this host, so there is nothing \
-                 here to sweep. Sweep from the wallet that holds them."
-                    .into(),
-            ));
-        }
+        // With your own key the spending keys are not on this host: nothing to do.
+        let own_xpub = get("DEADHOP_XPUB").is_some();
 
         let mode = match get("DEADHOP_WALLET_MODE").as_deref() {
             None | Some("send") => Mode::Send,
@@ -141,16 +132,11 @@ impl Config {
         }
         let payjoin_uri_file = get("DEADHOP_WALLET_PAYJOIN_URI_FILE").map(PathBuf::from);
         let electrum = get("DEADHOP_ELECTRUM");
-        let sweeping =
-            destination.is_some() || (mode == Mode::Payjoin && payjoin_uri_file.is_some());
+        let sweeping = destination.is_some() || (mode == Mode::Payjoin && payjoin_uri_file.is_some());
         let (electrum, electrum_security) = match (electrum, sweeping) {
             (Some(e), _) => parse_electrum(&e, get("DEADHOP_ELECTRUM_CERT_SHA256").as_deref())?,
             (None, false) => (String::new(), Security::Plain),
-            (None, true) => {
-                return Err(Error::Config(
-                    "DEADHOP_ELECTRUM is required to sweep".into(),
-                ))
-            }
+            (None, true) => return Err(Error::Config("DEADHOP_ELECTRUM is required to sweep".into())),
         };
         match mode {
             Mode::Payjoin if payjoin_uri_file.is_none() && destination.is_some() => {
@@ -172,23 +158,19 @@ impl Config {
             Some(list) => Some(
                 list.split(',')
                     .map(|p| {
-                        parse_fingerprint(p).ok_or_else(|| {
-                            Error::Config(format!("'{}' is not a SHA-256 fingerprint", p.trim()))
-                        })
+                        parse_fingerprint(p)
+                            .ok_or_else(|| Error::Config(format!("'{}' is not a SHA-256 fingerprint", p.trim())))
                     })
                     .collect::<Result<Vec<_>>>()?,
             ),
         };
         let proxy = match get("DEADHOP_WALLET_PROXY") {
             None => None,
-            Some(p) => {
-                parse_proxy(&p).map_err(|e| Error::Config(format!("DEADHOP_WALLET_PROXY: {e}")))?
-            }
+            Some(p) => parse_proxy(&p).map_err(|e| Error::Config(format!("DEADHOP_WALLET_PROXY: {e}")))?,
         };
         let coinjoin = if mode == Mode::Coinjoin {
-            let relay = get("DEADHOP_WALLET_COINJOIN_RELAY").ok_or_else(|| {
-                Error::Config("coinjoin mode needs DEADHOP_WALLET_COINJOIN_RELAY".into())
-            })?;
+            let relay = get("DEADHOP_WALLET_COINJOIN_RELAY")
+                .ok_or_else(|| Error::Config("coinjoin mode needs DEADHOP_WALLET_COINJOIN_RELAY".into()))?;
             if !(relay.starts_with("wss://") || relay.starts_with("ws://")) {
                 return Err(Error::Config(
                     "DEADHOP_WALLET_COINJOIN_RELAY must be a ws:// or wss:// url".into(),
@@ -202,20 +184,12 @@ impl Config {
                     bounds::DENOMINATION_SAT,
                 )?,
                 peers: num("DEADHOP_WALLET_COINJOIN_PEERS", 5, bounds::PEERS)? as u32,
-                timeout_secs: num(
-                    "DEADHOP_WALLET_COINJOIN_TIMEOUT_SECS",
-                    1_800,
-                    bounds::TIMEOUT_SECS,
-                )?,
+                timeout_secs: num("DEADHOP_WALLET_COINJOIN_TIMEOUT_SECS", 1_800, bounds::TIMEOUT_SECS)?,
             })
         } else {
             None
         };
-        let threshold_sat = num(
-            "DEADHOP_WALLET_THRESHOLD_SAT",
-            1_000_000,
-            bounds::THRESHOLD_SAT,
-        )?;
+        let threshold_sat = num("DEADHOP_WALLET_THRESHOLD_SAT", 1_000_000, bounds::THRESHOLD_SAT)?;
         if let Some(cj) = &coinjoin {
             if threshold_sat < cj.denomination_sat + crate::coinjoin::MIN_EXCESS_SAT {
                 return Err(Error::Config(format!(
@@ -226,6 +200,7 @@ impl Config {
         }
         Ok(Config {
             network,
+            own_xpub,
             data_dir,
             xpub_file,
             state_dir,
@@ -236,13 +211,8 @@ impl Config {
             destination,
             threshold_sat,
             max_fee_rate: num("DEADHOP_WALLET_MAX_FEE_RATE", 20, bounds::MAX_FEE_RATE)? as f64,
-            fee_target_blocks: num("DEADHOP_WALLET_FEE_TARGET_BLOCKS", 6, bounds::FEE_TARGET)?
-                as u16,
-            min_confirmations: num(
-                "DEADHOP_WALLET_MIN_CONFIRMATIONS",
-                1,
-                bounds::MIN_CONFIRMATIONS,
-            )? as u32,
+            fee_target_blocks: num("DEADHOP_WALLET_FEE_TARGET_BLOCKS", 6, bounds::FEE_TARGET)? as u16,
+            min_confirmations: num("DEADHOP_WALLET_MIN_CONFIRMATIONS", 1, bounds::MIN_CONFIRMATIONS)? as u32,
             poll_secs: num("DEADHOP_WALLET_POLL_SECS", 300, bounds::POLL_SECS)?,
             gap: num("DEADHOP_WALLET_GAP", 50, bounds::GAP)? as u32,
             payjoin_uri_file,
@@ -268,11 +238,8 @@ mod tests {
 
     /// A valid regtest account key of another wallet.
     fn tpub() -> String {
-        crate::keys::Keys::from_phrase(
-            &bip39::Mnemonic::from_entropy(&[7u8; 32]).unwrap(),
-            Network::Regtest,
-        )
-        .account_key()
+        crate::keys::Keys::from_phrase(&bip39::Mnemonic::from_entropy(&[7u8; 32]).unwrap(), Network::Regtest)
+            .account_key()
     }
 
     fn env(pairs: &[(&'static str, &str)]) -> HashMap<&'static str, String> {
@@ -290,6 +257,7 @@ mod tests {
     #[test]
     fn holding_needs_nothing() {
         let c = load(&env(&[])).unwrap();
+        assert!(!c.own_xpub);
         assert_eq!(c.mode, Mode::Send);
         assert!(!c.sweeps());
         assert_eq!(c.state_dir, PathBuf::from("data"));
@@ -345,31 +313,21 @@ mod tests {
         ]))
         .unwrap();
         let cj = c.coinjoin.unwrap();
-        assert_eq!(
-            (cj.denomination_sat, cj.peers, cj.timeout_secs),
-            (100_000, 3, 1_800)
-        );
+        assert_eq!((cj.denomination_sat, cj.peers, cj.timeout_secs), (100_000, 3, 1_800));
     }
 
     #[test]
     fn mistakes_are_named() {
-        let base = [
-            ("DEADHOP_NETWORK", "regtest"),
-            ("DEADHOP_ELECTRUM", "127.0.0.1:50001"),
-        ];
+        let base = [("DEADHOP_NETWORK", "regtest"), ("DEADHOP_ELECTRUM", "127.0.0.1:50001")];
         let with = |extra: &[(&'static str, &str)]| {
             let mut v = base.to_vec();
             v.extend_from_slice(extra);
             err(&v)
         };
-        assert!(err(&[("DEADHOP_XPUB", &tpub())]).contains("not on this host"));
+        assert!(load(&env(&[("DEADHOP_XPUB", &tpub())])).unwrap().own_xpub);
         assert!(with(&[("DEADHOP_WALLET_MODE", "lightning")]).contains("send, payjoin or coinjoin"));
         assert!(with(&[("DEADHOP_WALLET_DESTINATION", "bc1q")]).contains("account key"));
-        assert!(err(&[
-            ("DEADHOP_NETWORK", "regtest"),
-            ("DEADHOP_WALLET_DESTINATION", &tpub())
-        ])
-        .contains("ELECTRUM"));
+        assert!(err(&[("DEADHOP_NETWORK", "regtest"), ("DEADHOP_WALLET_DESTINATION", &tpub())]).contains("ELECTRUM"));
         assert!(with(&[
             ("DEADHOP_WALLET_MODE", "payjoin"),
             ("DEADHOP_WALLET_DESTINATION", &tpub())

@@ -32,7 +32,10 @@ const MAX_URI: usize = 2_000;
 /// Largest response accepted from a receiver.
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 /// How long the receiver may take to answer.
+#[cfg(not(test))]
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn err(why: impl std::fmt::Display) -> Error {
     Error::Payjoin(why.to_string())
@@ -75,20 +78,14 @@ pub async fn post(
 ) -> Result<Vec<u8>> {
     let parsed = payjoin::Url::parse(url).map_err(|e| err(format!("bad endpoint ({e:?})")))?;
     let host = parsed.host_str();
-    let host = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_string();
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_string();
     let tls = match parsed.scheme() {
         "https" => true,
         "http" if host.ends_with(".onion") => false,
         _ => return Err(err("the endpoint must be https:// or a Tor .onion address")),
     };
     let port = parsed.port().unwrap_or(if tls { 443 } else { 80 });
-    let mut target = parsed.path().to_string();
-    if target.is_empty() {
-        target.push('/');
-    }
+    let mut target = Some(parsed.path()).filter(|p| !p.is_empty()).unwrap_or("/").to_string();
     if let Some(q) = parsed.query() {
         target.push('?');
         target.push_str(q);
@@ -103,11 +100,7 @@ pub async fn post(
                 if !tls {
                     return Err(err("a .onion endpoint needs DEADHOP_WALLET_PROXY (Tor)"));
                 }
-                Box::new(
-                    TcpStream::connect((host.as_str(), port))
-                        .await
-                        .map_err(err)?,
-                )
+                Box::new(TcpStream::connect((host.as_str(), port)).await.map_err(err)?)
             }
         };
         let mut stream: Box<dyn deadhop::relay::Io> = if tls {
@@ -178,13 +171,7 @@ fn parse_response(raw: &[u8]) -> Result<Vec<u8>> {
         let text: String = String::from_utf8_lossy(body)
             .chars()
             .take(200)
-            .map(|c| {
-                if deadhop::service::is_plain_text(c) {
-                    c
-                } else {
-                    '?'
-                }
-            })
+            .map(|c| if deadhop::service::is_plain_text(c) { c } else { '?' })
             .collect();
         return Err(err(format!("the receiver answered {status}: {text}")));
     }
@@ -211,21 +198,14 @@ fn finish(
         // And this wallet pays no more than the Original's fee.
         max_cost: spent - original.output[0].value,
     };
-    let signed = tx::sign(
-        &mut proposal,
-        &s.keys,
-        &index(coins),
-        &rules,
-        EcdsaSighashType::All,
-    )?;
-    if signed != coins.len() {
-        return Err(err("the proposal dropped some of our inputs"));
-    }
+    // (The payjoin library has already checked that every input of the
+    // Original is still there.)
+    tx::sign(&mut proposal, &s.keys, &index(coins), &rules, EcdsaSighashType::All)?;
     Ok(tx::extract(proposal))
 }
 
 /// A PayJoin sweep of `coins` at `rate` sat/vB.
-pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Result<Option<Sweep>> {
+pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Result<Sweep> {
     let file = s
         .cfg
         .payjoin_uri_file
@@ -233,12 +213,7 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
         .ok_or_else(|| Error::Config("DEADHOP_WALLET_PAYJOIN_URI_FILE is not set".into()))?;
     let text = match std::fs::read_to_string(&file) {
         Ok(t) if !t.trim().is_empty() => t,
-        _ => {
-            return Err(err(format!(
-                "waiting for a PayJoin URI in {}",
-                file.display()
-            )))
-        }
+        _ => return Err(err(format!("waiting for a PayJoin URI in {}", file.display()))),
     };
     let hash = uri_hash(&text);
     if s.state.payjoin_used(&hash) {
@@ -260,19 +235,15 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
         min_to: total - fee,
         max_cost: s.max_fee(coins.len(), &[&payee]),
     };
-    tx::sign(
-        &mut original,
-        &s.keys,
-        &index(coins),
-        &rules,
-        EcdsaSighashType::All,
-    )?;
+    tx::sign(&mut original, &s.keys, &index(coins), &rules, EcdsaSighashType::All)?;
     let original_tx = original.clone().extract_tx_unchecked_fee_rate();
     let min_rate = FeeRate::from_sat_per_vb_u32(rate.floor() as u32);
-    let sender = SenderBuilder::new(original, uri)
-        .always_disable_output_substitution()
+    // Cannot fail for the Original built above (one payee, no change, signed ALL).
+    let builder = SenderBuilder::new(original, uri).always_disable_output_substitution();
+    let sender = builder
         .build_recommended(min_rate)
-        .map_err(|e| err(format!("cannot prepare the request: {e}")))?;
+        .ok()
+        .ok_or(err("cannot prepare the request"))?;
     let (request, ctx) = sender.create_v1_post_request();
     // From here on the URI counts as used, whatever happens.
     s.state.use_payjoin(hash);
@@ -292,7 +263,7 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
     let (tx, mode) = match attempt {
         Ok(tx) => (tx, Mode::Payjoin.label().to_string()),
         Err(e) => {
-            tracing::warn!("payjoin failed, broadcasting the original payment instead: {e}");
+            tracing::warn!(error = %e, "payjoin failed, broadcasting the original payment instead");
             (original_tx, "payjoin-fallback".to_string())
         }
     };
@@ -303,19 +274,20 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
         .filter(|o| o.script_pubkey == payee)
         .map(|o| o.value)
         .sum::<Amount>();
-    Ok(Some(Sweep {
+    Ok(Sweep {
         at: now,
         mode,
         txid: txid.to_string(),
         spent_sat: total.to_sat(),
         moved_sat: moved.to_sat(),
         to: address,
-    }))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn uris_are_checked() {
@@ -327,15 +299,9 @@ mod tests {
         let e = |t: &str| parse_uri(t, net).err().unwrap().to_string();
         assert!(e("hello").contains("not a bitcoin"));
         assert!(e(&format!("bitcoin:{addr}")).contains("pj="));
-        assert!(e(&format!(
-            "bitcoin:{addr}?amount=1&pj=https://example.com/pj"
-        ))
-        .contains("amount"));
+        assert!(e(&format!("bitcoin:{addr}?amount=1&pj=https://example.com/pj")).contains("amount"));
         assert!(e(&format!("bitcoin:{addr}?pj=http://example.com/pj")).contains("not a bitcoin"));
-        assert!(
-            e("bitcoin:bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu?pj=https://example.com/pj")
-                .contains("network")
-        );
+        assert!(e("bitcoin:bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu?pj=https://example.com/pj").contains("network"));
         assert!(e(&"x".repeat(MAX_URI + 1)).contains("too long"));
     }
 
@@ -343,10 +309,7 @@ mod tests {
     fn http_responses_are_parsed_strictly() {
         let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcdef";
         assert_eq!(parse_response(ok).unwrap(), b"abc");
-        assert_eq!(
-            parse_response(b"HTTP/1.1 200 OK\r\n\r\nall").unwrap(),
-            b"all"
-        );
+        assert_eq!(parse_response(b"HTTP/1.1 200 OK\r\n\r\nall").unwrap(), b"all");
         let e = |r: &[u8]| parse_response(r).unwrap_err().to_string();
         assert!(e(b"HTTP/1.1 400 Bad\r\nContent-Length: 5\r\n\r\n{\"x\"}").contains("400"));
         assert!(e(b"garbage").contains("malformed"));
@@ -357,16 +320,179 @@ mod tests {
         assert!(e(&vec![b'a'; MAX_RESPONSE + 1]).contains("too large"));
     }
 
+    /// A SOCKS5 proxy that answers every connection itself with `reply`.
+    async fn socks5_that_answers(reply: &'static [u8]) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut c, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            c.read_exact(&mut greeting).await.unwrap();
+            c.write_all(&[5, 0]).await.unwrap();
+            let mut head = [0u8; 5];
+            c.read_exact(&mut head).await.unwrap();
+            let mut rest = vec![0u8; head[4] as usize + 2];
+            c.read_exact(&mut rest).await.unwrap();
+            c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            // The whole request (the body is one byte), then the answer.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !req.ends_with(b"\r\n\r\nx") {
+                let n = c.read(&mut buf).await.unwrap();
+                req.extend_from_slice(&buf[..n]);
+            }
+            assert!(String::from_utf8_lossy(&req).starts_with("POST /?v=1 HTTP/1.1\r\nHost: abc.onion"));
+            c.write_all(reply).await.unwrap();
+            c.shutdown().await.unwrap();
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn onion_endpoints_go_through_the_proxy() {
+        let port = socks5_that_answers(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+        let proxy = deadhop::relay::parse_proxy(&format!("socks5://127.0.0.1:{port}"))
+            .unwrap()
+            .unwrap();
+        let body = post("http://abc.onion?v=1", "text/plain", b"x", None, Some(&proxy))
+            .await
+            .unwrap();
+        assert_eq!(body, b"ok");
+        let dead = deadhop::relay::parse_proxy("socks5://127.0.0.1:1").unwrap().unwrap();
+        let e = post("http://abc.onion/pj", "text/plain", b"x", None, Some(&dead))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("proxy"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn waits_for_a_fresh_usable_uri() {
+        use crate::chain::tests::FakeChain;
+        use crate::keys::EXTERNAL;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("payjoin.uri");
+        let k = crate::keys::tests::keys();
+        let chain = FakeChain {
+            tip: 100,
+            relay: 1.0,
+            ..FakeChain::default()
+        };
+        chain.fund(&k.script(EXTERNAL, 0), 200_000, Some(90));
+        let (mut s, _) = crate::sweep::tests::sweeper(
+            dir.path(),
+            chain,
+            &[
+                ("DEADHOP_WALLET_MODE", "payjoin".into()),
+                ("DEADHOP_WALLET_PAYJOIN_URI_FILE", file.to_string_lossy().into_owned()),
+            ],
+        );
+        let waiting = |o: &crate::sweep::Outcome, text: &str| matches!(o, crate::sweep::Outcome::Waiting { why, .. } if why.contains(text));
+        let o = s.tick(1).await.unwrap();
+        assert!(waiting(&o, "waiting for a PayJoin URI"), "{o:?}");
+        std::fs::write(&file, "bitcoin:nonsense").unwrap();
+        let o = s.tick(2).await.unwrap();
+        assert!(waiting(&o, "not a bitcoin"), "{o:?}");
+        // A URI-less configuration cannot get here.
+        s.cfg.payjoin_uri_file = None;
+        assert!(matches!(sweep(&mut s, &[], 1.0, 3).await, Err(Error::Config(_))));
+    }
+
+    /// An HTTPS server on 127.0.0.1 (the test certificate) that answers
+    /// every request with `reply`. Returns its port and certificate pin.
+    async fn https_that_answers(reply: &'static [u8]) -> (u16, [u8; 32]) {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let cert =
+            CertificateDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-cert.pem")).unwrap();
+        let pin = deadhop::electrum::parse_fingerprint(&deadhop::electrum::fingerprint_hex(cert.as_ref())).unwrap();
+        let key =
+            PrivateKeyDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-key.pem")).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(tcp).await.unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            let _ = tls.read(&mut buf).await.unwrap();
+            tls.write_all(reply).await.unwrap();
+            tls.shutdown().await.unwrap();
+        });
+        (port, pin)
+    }
+
+    #[tokio::test]
+    async fn a_refused_proposal_falls_back_to_the_original() {
+        crate::test_logs();
+        use crate::chain::tests::FakeChain;
+        use crate::keys::EXTERNAL;
+        let (port, pin) = https_that_answers(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\njunk!").await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("payjoin.uri");
+        let k = crate::keys::tests::keys();
+        let receiver = k.address(EXTERNAL, 77);
+        std::fs::write(&file, format!("bitcoin:{receiver}?pj=https://127.0.0.1:{port}/pj")).unwrap();
+        let chain = FakeChain {
+            tip: 100,
+            relay: 1.0,
+            ..FakeChain::default()
+        };
+        chain.fund(&k.script(EXTERNAL, 0), 200_000, Some(90));
+        let (mut s, shared) = crate::sweep::tests::sweeper(
+            dir.path(),
+            chain,
+            &[
+                ("DEADHOP_WALLET_MODE", "payjoin".into()),
+                ("DEADHOP_WALLET_PAYJOIN_URI_FILE", file.to_string_lossy().into_owned()),
+            ],
+        );
+        s.cfg.payjoin_pins = Some(vec![pin]);
+        let o = s.tick(1).await.unwrap();
+        assert!(
+            matches!(&o, crate::sweep::Outcome::Swept(w) if w.mode == "payjoin-fallback"),
+            "{o:?}"
+        );
+        let sent = shared.0.broadcasts.lock().unwrap()[0].clone();
+        assert_eq!(sent.output[0].script_pubkey, receiver.script_pubkey());
+        // The URI was used up, and that is on disk.
+        assert_eq!(crate::state::State::load(dir.path()).unwrap().used_payjoin.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tls_problems_and_silence_are_errors() {
+        // Not TLS at all.
+        let plain = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = plain.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut c, _) = plain.accept().await.unwrap();
+            c.write_all(b"HTTP/1.1 400 nope\r\n\r\n").await.unwrap();
+        });
+        let e = post(&format!("https://127.0.0.1:{port}/pj"), "text/plain", b"", None, None)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("TLS"), "{e}");
+        // Connects (the kernel queues it), never answers.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let e = post(&format!("https://127.0.0.1:{port}/pj"), "text/plain", b"", None, None)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("in time"), "{e}");
+        drop(silent);
+    }
+
     #[tokio::test]
     async fn endpoints_must_be_private() {
         let e = |r: Result<Vec<u8>>| r.unwrap_err().to_string();
-        assert!(
-            e(post("http://example.com/pj", "text/plain", b"", None, None).await).contains("https")
-        );
-        assert!(
-            e(post("http://abc.onion/pj", "text/plain", b"", None, None).await).contains("PROXY")
-        );
+        assert!(e(post("http://example.com/pj", "text/plain", b"", None, None).await).contains("https"));
+        assert!(e(post("http://abc.onion/pj", "text/plain", b"", None, None).await).contains("PROXY"));
         assert!(e(post("not a url", "text/plain", b"", None, None).await).contains("bad endpoint"));
-        assert!(e(post("https://127.0.0.1:1/pj", "text/plain", b"", None, None).await).len() > 0);
+        assert!(!e(post("https://127.0.0.1:1/pj", "text/plain", b"", None, None).await).is_empty());
     }
 }

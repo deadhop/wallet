@@ -45,9 +45,8 @@ impl State {
 
     pub fn load(dir: &Path) -> Result<State> {
         match std::fs::read_to_string(Self::path(dir)) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| {
-                Error::Config(format!("{} is damaged: {e}", Self::path(dir).display()))
-            }),
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|e| Error::Config(format!("{} is damaged: {e}", Self::path(dir).display()))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(e) => Err(e.into()),
         }
@@ -59,11 +58,7 @@ impl State {
         let path = Self::path(dir);
         let tmp = path.with_extension("tmp");
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(
-            serde_json::to_string_pretty(self)
-                .expect("plain data")
-                .as_bytes(),
-        )?;
+        f.write_all(serde_json::to_string_pretty(self).expect("plain data").as_bytes())?;
         f.sync_all()?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
@@ -120,10 +115,7 @@ mod tests {
         assert_eq!(State::load(dir.path()).unwrap(), s);
 
         std::fs::write(State::path(dir.path()), "{").unwrap();
-        assert!(State::load(dir.path())
-            .unwrap_err()
-            .to_string()
-            .contains("damaged"));
+        assert!(State::load(dir.path()).unwrap_err().to_string().contains("damaged"));
         let not_a_dir = dir.path().join(STATE_FILE).join("x");
         assert!(State::load(&not_a_dir).is_err());
         assert!(s.save(&not_a_dir).is_err());

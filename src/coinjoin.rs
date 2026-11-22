@@ -65,7 +65,10 @@ const VBYTES_PER_PEER: f64 = 100.0;
 /// How often the relay is asked for new messages.
 const POLL: Duration = Duration::from_secs(2);
 /// How long a joiner waits for credentials from one pool.
+#[cfg(not(test))]
 const CREDENTIALS_WAIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const CREDENTIALS_WAIT: Duration = Duration::from_secs(3);
 
 fn err(why: impl std::fmt::Display) -> Error {
     Error::Coinjoin(why.to_string())
@@ -200,8 +203,7 @@ pub async fn find_or_create<'a>(
         .filter(|e| e.verify().is_ok())
         .filter_map(|e| {
             let p: Pool = serde_json::from_str(&e.content).ok()?;
-            (p.public_key == e.pubkey.to_hex() && p.acceptable(cfg, max_fee_rate, now))
-                .then_some((e, p))
+            (p.public_key == e.pubkey.to_hex() && p.acceptable(cfg, max_fee_rate, now)).then_some((e, p))
         })
         .collect();
     candidates.sort_by_key(|(e, _)| std::cmp::Reverse(e.created_at));
@@ -238,11 +240,7 @@ pub async fn find_or_create<'a>(
     .sign_with_keys(&pool_keys)
     .map_err(err)?;
     board.publish(announcement).await?;
-    tracing::info!(
-        "announced coinjoin pool {} for {} peers",
-        pool.id,
-        pool.peers
-    );
+    tracing::info!(pool = %pool.id, peers = pool.peers, "announced a coinjoin pool");
     Ok(Round {
         board,
         pool,
@@ -262,16 +260,13 @@ async fn join(board: &dyn Board, pool_pk: &PublicKey, pool: &Pool) -> Result<Opt
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(POLL).await;
         let replies = board
-            .fetch(
-                Filter::new()
-                    .kind(Kind::EncryptedDirectMessage)
-                    .pubkey(me.public_key()),
-            )
+            .fetch(Filter::new().kind(Kind::EncryptedDirectMessage).pubkey(me.public_key()))
             .await?;
-        for r in &replies {
-            if let Some(keys) = open(&me, r).and_then(|v| credentials(&v, pool)) {
-                return Ok(Some(keys));
-            }
+        let found = replies
+            .iter()
+            .find_map(|r| open(&me, r).and_then(|v| credentials(&v, pool)));
+        if found.is_some() {
+            return Ok(found);
         }
     }
     Ok(None)
@@ -391,11 +386,7 @@ impl Round<'_> {
                     if !seen.seen_inputs.insert(text.to_string()) {
                         continue;
                     }
-                    if let Some(p) = B64
-                        .decode(text)
-                        .ok()
-                        .and_then(|b| Psbt::deserialize(&b).ok())
-                    {
+                    if let Some(p) = B64.decode(text).ok().and_then(|b| Psbt::deserialize(&b).ok()) {
                         seen.inputs.push(p);
                     }
                 }
@@ -406,13 +397,7 @@ impl Round<'_> {
     }
 
     /// This member's input, signed `ALL|ANYONECANPAY` over every output.
-    pub fn sign_input(
-        &self,
-        s: &Sweeper,
-        coin: &Coin,
-        dest: &ScriptBuf,
-        outputs: Vec<TxOut>,
-    ) -> Result<Psbt> {
+    pub fn sign_input(&self, s: &Sweeper, coin: &Coin, dest: &ScriptBuf, outputs: Vec<TxOut>) -> Result<Psbt> {
         let mut psbt = tx::build(&[coin], outputs, Sequence::ENABLE_LOCKTIME_NO_RBF);
         let out = Amount::from_sat(self.pool.output_sat());
         let rules = Rules {
@@ -430,18 +415,10 @@ impl Round<'_> {
             .count()
             != 1
         {
-            return Err(err(
-                "our output is missing from the pool, or registered twice",
-            ));
+            return Err(err("our output is missing from the pool, or registered twice"));
         }
-        tx::sign(
-            &mut psbt,
-            &s.keys,
-            &index(std::slice::from_ref(coin)),
-            &rules,
-            EcdsaSighashType::AllPlusAnyoneCanPay,
-        )?;
-        Ok(psbt)
+        let ours = index(std::slice::from_ref(coin));
+        tx::sign(&mut psbt, &s.keys, &ours, &rules, EcdsaSighashType::AllPlusAnyoneCanPay).map(|_| psbt)
     }
 
     /// Combine the members' inputs into the final transaction.
@@ -452,10 +429,7 @@ impl Round<'_> {
             let ok = p.unsigned_tx.input.len() == 1
                 && p.inputs.len() == 1
                 && p.unsigned_tx.output == outputs
-                && p.inputs[0]
-                    .final_script_witness
-                    .as_ref()
-                    .is_some_and(|w| !w.is_empty());
+                && p.inputs[0].final_script_witness.as_ref().is_some_and(|w| !w.is_empty());
             if !ok {
                 return Err(err("a member's input does not match the pool"));
             }
@@ -463,10 +437,7 @@ impl Round<'_> {
             if !spent.insert(txin.previous_output) {
                 return Err(err("two members posted the same coin"));
             }
-            txin.witness = p.inputs[0]
-                .final_script_witness
-                .clone()
-                .expect("checked above");
+            txin.witness = p.inputs[0].final_script_witness.clone().expect("checked above");
             txin.script_sig = ScriptBuf::new();
             txins.push(txin);
         }
@@ -501,8 +472,7 @@ impl Round<'_> {
         let since = Timestamp::from(Timestamp::now().as_secs().saturating_sub(5));
         let mut admitted = HashSet::new();
         let mut seen = Seen::default();
-        self.post(json!({"address": address, "type": "output"}))
-            .await?;
+        self.post(json!({"address": address, "type": "output"})).await?;
         let mut signed: Option<Vec<TxOut>> = None;
         let peers = self.pool.peers as usize;
         loop {
@@ -519,9 +489,7 @@ impl Round<'_> {
             self.admit(&mut admitted, since).await?;
             self.collect(&mut seen, since).await?;
             if seen.outputs.len() > peers {
-                return Err(err(
-                    "more outputs than peers were registered; leaving the pool",
-                ));
+                return Err(err("more outputs than peers were registered; leaving the pool"));
             }
             if signed.is_none() && seen.outputs.len() == peers {
                 let outputs = self.outputs(&seen.outputs)?;
@@ -547,13 +515,7 @@ impl Round<'_> {
 }
 
 /// Consolidate the confirmed coins into one premix coin (and change).
-async fn premix(
-    s: &mut Sweeper,
-    cj: &CoinjoinConfig,
-    coins: &[Coin],
-    rate: f64,
-    now: u64,
-) -> Result<Sweep> {
+async fn premix(s: &mut Sweeper, cj: &CoinjoinConfig, coins: &[Coin], rate: f64, now: u64) -> Result<Sweep> {
     let total: Amount = coins.iter().map(|c| c.value).sum();
     let mix = Amount::from_sat(cj.denomination_sat + PREMIX_EXCESS_SAT);
     let mix_script = s.keys.script(INTERNAL, s.state.next_change);
@@ -595,13 +557,7 @@ async fn premix(
         min_to: moved,
         max_cost: s.max_fee(coins.len(), &[&mix_script, &change_script]),
     };
-    tx::sign(
-        &mut psbt,
-        &s.keys,
-        &index(coins),
-        &rules,
-        EcdsaSighashType::All,
-    )?;
+    tx::sign(&mut psbt, &s.keys, &index(coins), &rules, EcdsaSighashType::All)?;
     let txid = s.chain.broadcast(&tx::extract(psbt)).await?;
     let address = s.keys.address(INTERNAL, s.state.next_change).to_string();
     s.state.next_change += 2;
@@ -619,27 +575,21 @@ async fn premix(
 async fn broadcast(s: &Sweeper, tx: &Transaction) -> Result<bitcoin::Txid> {
     match s.chain.broadcast(tx).await {
         Ok(t) => Ok(t),
-        Err(e) if e.to_string().contains("already") || e.to_string().contains("known") => {
-            Ok(tx.compute_txid())
-        }
+        Err(e) if e.to_string().contains("already") || e.to_string().contains("known") => Ok(tx.compute_txid()),
         Err(e) => Err(e),
     }
 }
 
 /// A CoinJoin sweep: premix if needed, then one round.
-pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Result<Option<Sweep>> {
+pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Result<Sweep> {
     let cj = s
         .cfg
         .coinjoin
         .clone()
         .ok_or_else(|| Error::Config("coinjoin mode needs its settings".into()))?;
     let range = cj.denomination_sat + MIN_EXCESS_SAT..=cj.denomination_sat + MAX_EXCESS_SAT;
-    let Some(coin) = coins
-        .iter()
-        .find(|c| range.contains(&c.value.to_sat()))
-        .cloned()
-    else {
-        return premix(s, &cj, coins, rate, now).await.map(Some);
+    let Some(coin) = coins.iter().find(|c| range.contains(&c.value.to_sat())).cloned() else {
+        return premix(s, &cj, coins, rate, now).await;
     };
     let client = deadhop::relay::Pool::new(Keys::generate(), s.cfg.proxy.clone());
     let client = client.client().clone();
@@ -647,7 +597,7 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
     client.connect().await;
     let result = round(s, client.as_ref(), &cj, &coin, rate, now).await;
     client.disconnect().await;
-    result.map(Some)
+    result
 }
 
 /// Find or announce a pool and take part with `coin`.
@@ -661,9 +611,7 @@ pub async fn round(
 ) -> Result<Sweep> {
     let round = find_or_create(board, cj, s.cfg.max_fee_rate, rate, now, s.cfg.network).await?;
     let (dest, address) = s.destination()?;
-    let tx = round
-        .run(s, coin, &dest, &address, now + cj.timeout_secs)
-        .await?;
+    let tx = round.run(s, coin, &dest, &address, now + cj.timeout_secs).await?;
     let txid = broadcast(s, &tx).await?;
     s.state.next_destination += 1;
     Ok(Sweep {
@@ -709,6 +657,296 @@ pub(crate) mod tests {
             denomination_sat: 100_000,
             peers,
             timeout_secs: 600,
+        }
+    }
+
+    /// A member: its own keys and a premix coin of denomination + 1000.
+    fn member(n: u8, dir: &std::path::Path) -> (Sweeper, Coin) {
+        let keys = crate::keys::Keys::from_phrase(&bip39::Mnemonic::from_entropy(&[n; 32]).unwrap(), Network::Regtest);
+        let mut coin = crate::tx::tests::coin(&keys, 0, 101_000, n);
+        coin.chain = INTERNAL;
+        coin.script = keys.script(INTERNAL, 0);
+        let cfg = crate::sweep::tests::config(dir, &[]);
+        let s = Sweeper::new(
+            cfg,
+            keys,
+            Box::new(crate::chain::tests::FakeChain::default()),
+            Default::default(),
+        )
+        .unwrap();
+        (s, coin)
+    }
+
+    #[tokio::test]
+    async fn three_members_build_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = FakeBoard::default();
+        let c = cfg(3);
+        let now = Timestamp::now().as_secs();
+        let members: Vec<(Sweeper, Coin)> = (1..=3).map(|n| member(n, dir.path())).collect();
+        let dests: Vec<(ScriptBuf, String)> = (0..3u32)
+            .map(|i| {
+                let a = members[0].0.keys.address(crate::keys::EXTERNAL, 100 + i);
+                (a.script_pubkey(), a.to_string())
+            })
+            .collect();
+        let creator = find_or_create(&board, &c, 20.0, 2.0, now, Network::Regtest)
+            .await
+            .unwrap();
+        assert!(creator.creator);
+        async fn take_part(
+            round: Round<'_>,
+            s: &Sweeper,
+            coin: &Coin,
+            dest: &(ScriptBuf, String),
+            deadline: u64,
+        ) -> Result<Transaction> {
+            round.run(s, coin, &dest.0, &dest.1, deadline).await
+        }
+        async fn join_and_take_part(
+            board: &FakeBoard,
+            c: &CoinjoinConfig,
+            now: u64,
+            s: &Sweeper,
+            coin: &Coin,
+            dest: &(ScriptBuf, String),
+        ) -> Result<Transaction> {
+            let round = find_or_create(board, c, 20.0, 2.0, now, Network::Regtest).await?;
+            assert!(!round.creator, "joins the announced pool");
+            take_part(round, s, coin, dest, now + 120).await
+        }
+        let (a, b, d) = tokio::join!(
+            take_part(creator, &members[0].0, &members[0].1, &dests[0], now + 120),
+            join_and_take_part(&board, &c, now, &members[1].0, &members[1].1, &dests[1]),
+            join_and_take_part(&board, &c, now, &members[2].0, &members[2].1, &dests[2]),
+        );
+        let txs = [a.unwrap(), b.unwrap(), d.unwrap()];
+        assert!(
+            txs.iter().all(|t| t == &txs[0]),
+            "every member built the same transaction"
+        );
+        let tx = &txs[0];
+        assert_eq!(tx.input.len(), 3);
+        assert!(tx.input.iter().all(|i| i.witness.len() == 2));
+        assert_eq!(tx.output.len(), 3);
+        assert!(tx.output.iter().all(|o| o.value.to_sat() == output_sat(100_000, 2.0)));
+        for (dest, _) in &dests {
+            assert_eq!(tx.output.iter().filter(|o| &o.script_pubkey == dest).count(), 1);
+        }
+        // Each signature commits to every output but only to its own input.
+        let sig = &tx.input[0].witness.to_vec()[0];
+        assert_eq!(*sig.last().unwrap(), 0x81);
+        // A late joiner finds the pool full: the creator admitted only two.
+        let late = Keys::generate();
+        let pool_pk = PublicKey::from_hex(&board.0.lock().unwrap()[0].pubkey.to_hex()).unwrap();
+        board
+            .publish(message(&late, &pool_pk, &json!({"type": "join_pool"})).unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_round_without_enough_members_expires_without_spending() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = FakeBoard::default();
+        let now = Timestamp::now().as_secs();
+        let round = find_or_create(&board, &cfg(3), 20.0, 2.0, now, Network::Regtest)
+            .await
+            .unwrap();
+        let (s, coin) = member(1, dir.path());
+        let (dest, addr) = (
+            s.keys.script(crate::keys::EXTERNAL, 1),
+            s.keys.address(crate::keys::EXTERNAL, 1).to_string(),
+        );
+        let e = round
+            .run(&s, &coin, &dest, &addr, now + 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("did not complete in time") && e.contains("1 of 3 outputs"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hostile_pool_messages_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = FakeBoard::default();
+        let now = Timestamp::now().as_secs();
+        let round = find_or_create(&board, &cfg(2), 20.0, 2.0, now, Network::Regtest)
+            .await
+            .unwrap();
+        let (s, coin) = member(1, dir.path());
+        let dest = s.keys.script(crate::keys::EXTERNAL, 1);
+        // An address for another network.
+        let foreign = ["bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu".to_string()]
+            .into_iter()
+            .collect();
+        assert!(round
+            .outputs(&foreign)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid address"));
+        // Our output missing.
+        let other = s.keys.address(crate::keys::EXTERNAL, 9).to_string();
+        let outs = round.outputs(&[other.clone()].into_iter().collect()).unwrap();
+        assert!(round
+            .sign_input(&s, &coin, &dest, outs)
+            .unwrap_err()
+            .to_string()
+            .contains("missing"));
+        // Inputs that do not match, are reused, or leave ours out.
+        let mine = s.keys.address(crate::keys::EXTERNAL, 1).to_string();
+        let outs = round.outputs(&[mine, other].into_iter().collect()).unwrap();
+        let signed = round.sign_input(&s, &coin, &dest, outs.clone()).unwrap();
+        let e = |inputs: &[Psbt], c: &Coin| round.combine(inputs, &outs, c).unwrap_err().to_string();
+        let mut wrong = signed.clone();
+        wrong.unsigned_tx.output.pop();
+        assert!(e(&[signed.clone(), wrong], &coin).contains("does not match"));
+        assert!(e(&[signed.clone(), signed.clone()], &coin).contains("same coin"));
+        let (_, stranger) = member(2, dir.path());
+        assert!(e(std::slice::from_ref(&signed), &stranger).contains("our input"));
+        // Too many outputs registered: leave.
+        for n in 0..3u32 {
+            let a = s.keys.address(crate::keys::EXTERNAL, 20 + n).to_string();
+            round.post(json!({"address": a, "type": "output"})).await.unwrap();
+        }
+        round
+            .post(json!({"type": "input", "psbt": "not base64"}))
+            .await
+            .unwrap();
+        round.post(json!({"type": "input"})).await.unwrap();
+        round.post(json!({"type": "other"})).await.unwrap();
+        let addr = s.keys.address(crate::keys::EXTERNAL, 1).to_string();
+        let e = round
+            .run(&s, &coin, &dest, &addr, now + 60)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("more outputs than peers"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_silent_pool_is_given_up_for_a_new_one() {
+        crate::test_logs();
+        let board = FakeBoard::default();
+        let now = Timestamp::now().as_secs();
+        // Two announced, but their creators never answer.
+        let silent = find_or_create(&board, &cfg(3), 20.0, 2.0, now, Network::Regtest)
+            .await
+            .unwrap();
+        find_or_create(&board, &cfg(3), 20.0, 2.0, now, Network::Regtest)
+            .await
+            .unwrap();
+        // Junk on the board is ignored.
+        board
+            .publish(
+                EventBuilder::new(Kind::Custom(KIND_POOL), "not json")
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mine = find_or_create(&board, &cfg(3), 20.0, 2.0, now, Network::Regtest)
+            .await
+            .unwrap();
+        assert!(mine.creator && mine.pool.id != silent.pool.id);
+    }
+
+    #[tokio::test]
+    async fn the_creator_admits_each_member_once_and_no_more() {
+        let board = FakeBoard::default();
+        let now = Timestamp::now().as_secs();
+        let round = find_or_create(&board, &cfg(2), 20.0, 2.0, now, Network::Regtest)
+            .await
+            .unwrap();
+        let pool_pk = round.pool_pk();
+        let a = Keys::generate();
+        let join = json!({"type": "join_pool"});
+        board
+            .publish(message(&Keys::generate(), &pool_pk, &json!({"type": "other"})).unwrap())
+            .await
+            .unwrap();
+        board.publish(message(&a, &pool_pk, &join).unwrap()).await.unwrap();
+        board.publish(message(&a, &pool_pk, &join).unwrap()).await.unwrap();
+        let mut admitted = HashSet::new();
+        round.admit(&mut admitted, Timestamp::from(0)).await.unwrap();
+        assert_eq!(admitted.len(), 1, "one member, once, and the pool of two is full");
+        board
+            .publish(message(&Keys::generate(), &pool_pk, &join).unwrap())
+            .await
+            .unwrap();
+        round.admit(&mut admitted, Timestamp::from(0)).await.unwrap();
+        assert_eq!(admitted.len(), 1);
+        // A full pool, re-read with the creator counted too.
+        let mut more: HashSet<PublicKey> = [Keys::generate().public_key()].into();
+        let r2 = Round { creator: true, ..round };
+        r2.admit(&mut more, Timestamp::from(0)).await.unwrap();
+        // A message under the pool key that is not readable is skipped.
+        let garbage = EventBuilder::new(Kind::EncryptedDirectMessage, "garbage")
+            .sign_with_keys(&r2.pool_keys)
+            .unwrap();
+        board.publish(garbage).await.unwrap();
+        let mut seen = Seen::default();
+        r2.collect(&mut seen, Timestamp::from(0)).await.unwrap();
+        assert!(seen.outputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn premix_makes_one_coin_of_the_right_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(3);
+        let (mut s, _) = member(1, dir.path());
+        s.cfg.coinjoin = Some(c.clone());
+        let k = &s.keys;
+        let coins = [
+            crate::tx::tests::coin(k, 0, 80_000, 1),
+            crate::tx::tests::coin(k, 1, 60_000, 2),
+        ];
+        let shared = std::sync::Arc::new(crate::chain::tests::FakeChain::default());
+        s.chain = Box::new(crate::sweep::tests::Shared(shared.clone()));
+        // With change.
+        let p = sweep(&mut s, &coins, 2.0, 1).await.unwrap();
+        assert_eq!((p.mode.as_str(), p.moved_sat), ("coinjoin-premix", 101_000));
+        assert_eq!(shared.broadcasts.lock().unwrap()[0].output.len(), 2);
+        assert_eq!(s.state.next_change, 2);
+        // Without room for change, everything goes into the premix coin.
+        let snug = [
+            crate::tx::tests::coin(&s.keys, 0, 50_000, 3),
+            crate::tx::tests::coin(&s.keys, 1, 51_400, 4),
+        ];
+        sweep(&mut s, &snug, 2.0, 1).await.unwrap();
+        assert_eq!(shared.broadcasts.lock().unwrap()[1].output.len(), 1);
+        // Too little for a premix coin.
+        let few = [crate::tx::tests::coin(&s.keys, 0, 90_000, 5)];
+        let e = sweep(&mut s, &few, 2.0, 1).await.unwrap_err().to_string();
+        assert!(e.contains("cannot make a premix coin"), "{e}");
+        // No settings: a configuration error.
+        s.cfg.coinjoin = None;
+        assert!(matches!(sweep(&mut s, &coins, 2.0, 1).await, Err(Error::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn another_member_broadcasting_first_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, _) = member(1, dir.path());
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        for (msg, ok) in [
+            ("txn-already-known", true),
+            ("transaction already in block chain", true),
+            ("bad-txns", false),
+        ] {
+            s.chain = Box::new(crate::chain::tests::FakeChain {
+                refuse_with: Some(msg.into()),
+                ..Default::default()
+            });
+            assert_eq!(broadcast(&s, &tx).await.is_ok(), ok, "{msg}");
         }
     }
 

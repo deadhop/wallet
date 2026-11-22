@@ -13,3 +13,13 @@ pub mod scan;
 pub mod state;
 pub mod sweep;
 pub mod tx;
+
+/// Tests log everything the wallet says, to the test's own output, so every
+/// log line runs.
+#[cfg(test)]
+pub(crate) fn test_logs() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("deadhop_wallet=debug"))
+        .with_test_writer()
+        .try_init();
+}
