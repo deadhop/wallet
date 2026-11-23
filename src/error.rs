@@ -21,13 +21,28 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl From<deadhop::error::Error> for Error {
-    fn from(e: deadhop::error::Error) -> Self {
+impl From<deadhop_common::error::Error> for Error {
+    fn from(e: deadhop_common::error::Error) -> Self {
         match e {
-            deadhop::error::Error::Config(m) => Error::Config(m),
-            deadhop::error::Error::Io(e) => Error::Io(e),
+            deadhop_common::error::Error::Config(m) => Error::Config(m),
+            deadhop_common::error::Error::Io(e) => Error::Io(e),
             other => Error::Chain(other.to_string()),
         }
+    }
+}
+
+impl From<deadhop_electrum::error::Error> for Error {
+    fn from(e: deadhop_electrum::error::Error) -> Self {
+        match e {
+            deadhop_electrum::error::Error::Config(m) => Error::Config(m),
+            other => Error::Chain(other.to_string()),
+        }
+    }
+}
+
+impl From<deadhop_net::error::Error> for Error {
+    fn from(e: deadhop_net::error::Error) -> Self {
+        Error::Config(e.to_string())
     }
 }
 
@@ -37,11 +52,17 @@ mod tests {
 
     #[test]
     fn library_errors_keep_their_kind() {
-        let c: Error = deadhop::error::Error::Config("x".into()).into();
+        let c: Error = deadhop_common::error::Error::Config("x".into()).into();
         assert!(matches!(c, Error::Config(m) if m == "x"));
-        let io: Error = deadhop::error::Error::Io(std::io::Error::other("disk")).into();
+        let io: Error = deadhop_common::error::Error::Io(std::io::Error::other("disk")).into();
         assert!(matches!(io, Error::Io(_)));
-        let ch: Error = deadhop::error::Error::Chain("down".into()).into();
+        let ch: Error = deadhop_common::error::Error::Chain("down".into()).into();
         assert!(matches!(ch, Error::Chain(m) if m.contains("down")));
+        let ec: Error = deadhop_electrum::error::Error::Config("y".into()).into();
+        assert!(matches!(ec, Error::Config(m) if m == "y"));
+        let eb: Error = deadhop_electrum::error::Error::Chain("gone".into()).into();
+        assert!(matches!(eb, Error::Chain(m) if m.contains("gone")));
+        let p: Error = deadhop_net::error::Error::InvalidParams("bad".into()).into();
+        assert!(matches!(p, Error::Config(m) if m.contains("bad")));
     }
 }

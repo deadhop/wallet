@@ -4,7 +4,7 @@ use std::future::Future;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use deadhop::electrum::Electrum;
+use deadhop_electrum::Electrum;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -172,7 +172,7 @@ mod tests {
     /// A data directory as the offline wallet service leaves it.
     fn wallet_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let phrase = dir.path().join(deadhop::keyholder::PHRASE_FILE);
+        let phrase = dir.path().join(deadhop_common::PHRASE_FILE);
         std::fs::write(&phrase, PHRASE).unwrap();
         std::fs::set_permissions(&phrase, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(dir.path().join("account.xpub"), keys().account_key()).unwrap();
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(cmd(&["once"], &m).await, ExitCode::FAILURE);
         // Against the same server without the genesis check, one poll holds.
         let cfg = Config::from_env(&|k| m.get(k).cloned()).unwrap();
-        let chain = deadhop::electrum::Electrum::new(cfg.electrum.clone(), Duration::from_secs(5));
+        let chain = deadhop_electrum::Electrum::new(cfg.electrum.clone(), Duration::from_secs(5));
         let mut s = Sweeper::new(cfg, keys(), Box::new(chain), State::default()).unwrap();
         assert!(matches!(s.tick(1).await.unwrap(), Outcome::Below { .. }));
         let stop = tokio::time::sleep(Duration::from_millis(200));

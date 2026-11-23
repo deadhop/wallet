@@ -10,7 +10,12 @@ publish = false
 [dependencies]
 # The payment service's library: address derivation, the hardened Electrum
 # client, configuration parsing and private-file helpers.
-deadhop = { path = "../server" }
+# The shared crates of the payment service (not the service itself, so no
+# database or MCP server is linked in).
+deadhop-common = { path = "../server/crates/common" }
+deadhop-electrum = { path = "../server/crates/electrum" }
+deadhop-net = { path = "../server/crates/net", default-features = false }
+deadhop-tlspin = { path = "../server/crates/tlspin" }
 async-trait = "0.1"
 bip39 = { version = "2", default-features = false, features = ["std"] }
 bitcoin = { version = "0.32", default-features = false, features = ["std", "base64", "rand-std"] }

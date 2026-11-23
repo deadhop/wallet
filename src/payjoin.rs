@@ -74,7 +74,7 @@ pub async fn post(
     content_type: &str,
     body: &[u8],
     pins: Option<Vec<[u8; 32]>>,
-    proxy: Option<&deadhop::relay::ProxySpec>,
+    proxy: Option<&deadhop_net::relay::ProxySpec>,
 ) -> Result<Vec<u8>> {
     let parsed = payjoin::Url::parse(url).map_err(|e| err(format!("bad endpoint ({e:?})")))?;
     let host = parsed.host_str();
@@ -91,8 +91,8 @@ pub async fn post(
         target.push_str(q);
     }
     let work = async {
-        let stream: Box<dyn deadhop::relay::Io> = match proxy {
-            Some(p) => deadhop::relay::ProxyTransport::new(p.clone())
+        let stream: Box<dyn deadhop_net::relay::Io> = match proxy {
+            Some(p) => deadhop_net::relay::ProxyTransport::new(p.clone())
                 .tunnel(&host, port)
                 .await
                 .map_err(|e| err(format!("proxy: {e}")))?,
@@ -103,8 +103,10 @@ pub async fn post(
                 Box::new(TcpStream::connect((host.as_str(), port)).await.map_err(err)?)
             }
         };
-        let mut stream: Box<dyn deadhop::relay::Io> = if tls {
-            let config = Arc::new(deadhop::electrum::client_tls(pins));
+        let mut stream: Box<dyn deadhop_net::relay::Io> = if tls {
+            let config = Arc::new(deadhop_tlspin::tls_config(
+                pins.map(|p| deadhop_tlspin::pinned(Some(p))),
+            ));
             let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(err)?;
             Box::new(
                 tokio_rustls::TlsConnector::from(config)
@@ -171,7 +173,7 @@ fn parse_response(raw: &[u8]) -> Result<Vec<u8>> {
         let text: String = String::from_utf8_lossy(body)
             .chars()
             .take(200)
-            .map(|c| if deadhop::service::is_plain_text(c) { c } else { '?' })
+            .map(|c| if deadhop_net::is_plain_text(c) { c } else { '?' })
             .collect();
         return Err(err(format!("the receiver answered {status}: {text}")));
     }
@@ -357,14 +359,16 @@ mod tests {
     #[tokio::test]
     async fn onion_endpoints_go_through_the_proxy() {
         let port = socks5_that_answers(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
-        let proxy = deadhop::relay::parse_proxy(&format!("socks5://127.0.0.1:{port}"))
+        let proxy = deadhop_net::relay::parse_proxy(&format!("socks5://127.0.0.1:{port}"))
             .unwrap()
             .unwrap();
         let body = post("http://abc.onion?v=1", "text/plain", b"x", None, Some(&proxy))
             .await
             .unwrap();
         assert_eq!(body, b"ok");
-        let dead = deadhop::relay::parse_proxy("socks5://127.0.0.1:1").unwrap().unwrap();
+        let dead = deadhop_net::relay::parse_proxy("socks5://127.0.0.1:1")
+            .unwrap()
+            .unwrap();
         let e = post("http://abc.onion/pj", "text/plain", b"x", None, Some(&dead))
             .await
             .unwrap_err();
@@ -410,7 +414,7 @@ mod tests {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
         let cert =
             CertificateDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-cert.pem")).unwrap();
-        let pin = deadhop::electrum::parse_fingerprint(&deadhop::electrum::fingerprint_hex(cert.as_ref())).unwrap();
+        let pin = deadhop_electrum::parse_fingerprint(&deadhop_electrum::fingerprint_hex(cert.as_ref())).unwrap();
         let key =
             PrivateKeyDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-key.pem")).unwrap();
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))

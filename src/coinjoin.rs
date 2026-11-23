@@ -602,7 +602,7 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
     let Some(coin) = coins.iter().find(|c| premix_ready(&cj, c)).cloned() else {
         return premix(s, &cj, coins, rate, now).await;
     };
-    let client = deadhop::relay::Pool::new(Keys::generate(), s.cfg.proxy.clone());
+    let client = deadhop_net::relay::Pool::new(Keys::generate(), s.cfg.proxy.clone());
     let client = client.client().clone();
     client.add_relay(&cj.relay).await.map_err(err)?;
     client.connect().await;

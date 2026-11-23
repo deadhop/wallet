@@ -12,9 +12,9 @@ use bip39::Mnemonic;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
 use bitcoin::secp256k1::{All, Secp256k1};
 use bitcoin::{Address, CompressedPublicKey, Network, PrivateKey, ScriptBuf};
-use deadhop::app::read_private;
-use deadhop::keyholder::PHRASE_FILE;
-use deadhop::wallet::{account_path, encode_account, Wallet};
+use deadhop_common::files::read_private;
+use deadhop_common::wallet::{account_path, encode_account, Wallet};
+use deadhop_common::PHRASE_FILE;
 
 use crate::error::{Error, Result};
 
@@ -117,7 +117,7 @@ impl Keys {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use deadhop::wallet::account_from_phrase;
+    use deadhop_common::wallet::account_from_phrase;
     use std::os::unix::fs::PermissionsExt;
 
     pub const PHRASE: &str =

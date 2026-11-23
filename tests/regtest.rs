@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bip39::Mnemonic;
 use bitcoin::{Amount, Network, ScriptBuf};
-use deadhop::electrum::Electrum;
+use deadhop_electrum::Electrum;
 use deadhop_wallet::chain::Backend;
 use deadhop_wallet::config::Config;
 use deadhop_wallet::keys::{Keys, EXTERNAL, INTERNAL};
@@ -181,7 +181,7 @@ async fn payjoin_receiver(keys: Keys, coin: deadhop_wallet::tx::Coin) -> (u16, S
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     let cert =
         CertificateDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-cert.pem")).unwrap();
-    let fp = deadhop::electrum::fingerprint_hex(cert.as_ref());
+    let fp = deadhop_electrum::fingerprint_hex(cert.as_ref());
     let key = PrivateKeyDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-key.pem")).unwrap();
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()

@@ -5,10 +5,11 @@
 use std::path::PathBuf;
 
 use bitcoin::Network;
-use deadhop::config::{parse_electrum, parse_network};
-use deadhop::electrum::{parse_fingerprint, Security};
-use deadhop::relay::{parse_proxy, ProxySpec};
-use deadhop::wallet::Wallet as Watch;
+use deadhop_common::parse_network;
+use deadhop_common::wallet::Wallet as Watch;
+use deadhop_electrum::parse_electrum;
+use deadhop_electrum::{parse_fingerprint, Security};
+use deadhop_net::relay::{parse_proxy, ProxySpec};
 
 use crate::error::{Error, Result};
 

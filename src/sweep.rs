@@ -3,7 +3,7 @@
 
 use bitcoin::sighash::EcdsaSighashType;
 use bitcoin::{Amount, ScriptBuf};
-use deadhop::wallet::Wallet as Watch;
+use deadhop_common::wallet::Wallet as Watch;
 
 use crate::chain::Backend;
 use crate::config::{Config, Mode};

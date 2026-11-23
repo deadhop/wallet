@@ -8,8 +8,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, Txid};
-use deadhop::electrum::{Electrum, MAX_LINE_BYTES};
-use deadhop::wallet::scripthash;
+use deadhop_electrum::scripthash;
+use deadhop_electrum::{Electrum, MAX_LINE_BYTES};
 use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
