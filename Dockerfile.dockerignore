@@ -1,8 +1,7 @@
-# Only the two crates' sources go into the build context.
+# Only the shared crates' and the wallet's sources go into the build context.
 *
-!server/Cargo.toml
-!server/Cargo.lock
-!server/src
+!server/crates
+server/crates/*/target
 !wallet/Cargo.toml
 !wallet/Cargo.lock
 !wallet/src

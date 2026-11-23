@@ -3,8 +3,8 @@
 # wallet/Dockerfile.dockerignore keeping everything else out.
 FROM rust:1.99-slim-trixie AS build
 WORKDIR /src
-COPY server/Cargo.toml server/Cargo.lock ./server/
-COPY server/src ./server/src
+# Only the shared crates: the wallet does not link the payment service.
+COPY server/crates ./server/crates
 COPY wallet/Cargo.toml wallet/Cargo.lock ./wallet/
 COPY wallet/src ./wallet/src
 RUN cd wallet && cargo build --release --locked --bin deadhop-wallet \
