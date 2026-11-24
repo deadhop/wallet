@@ -155,6 +155,13 @@ pub fn check(psbt: &Psbt, ours: &Coins, rules: &Rules) -> Result<()> {
     if spent == Amount::ZERO {
         return refuse("the transaction spends none of our coins".into());
     }
+    // A transaction with a dust output is non-standard and would never
+    // relay; refuse it here rather than rely on the network to. It also stops
+    // a counterparty splitting the payment into sub-dust pieces that only
+    // reach `min_to` by summation.
+    if tx.output.iter().any(|o| o.value.to_sat() < DUST_SAT) {
+        return refuse("the transaction has a dust output".into());
+    }
     let to: Amount = tx
         .output
         .iter()
@@ -310,6 +317,22 @@ pub(crate) mod tests {
         p.unsigned_tx.input.push(p.unsigned_tx.input[0].clone());
         p.inputs.push(p.inputs[0].clone());
         assert!(err(&mut p, &rules(1, 1000)).contains("twice"));
+        // The payment split into sub-dust outputs to the approved script,
+        // reaching `min_to` only by summation (a hostile PayJoin receiver).
+        let (mut p, _) = sweep(&refs, &dest, 1.0).unwrap();
+        let total = p.unsigned_tx.output[0].value.to_sat();
+        let piece = DUST_SAT - 1;
+        p.unsigned_tx.output.clear();
+        p.outputs.clear();
+        for _ in 0..total / piece {
+            p.unsigned_tx.output.push(TxOut {
+                value: Amount::from_sat(piece),
+                script_pubkey: dest.clone(),
+            });
+            p.outputs.push(Default::default());
+        }
+        assert!(err(&mut p, &rules(piece, 1000)).contains("dust output"));
+        assert!(p.inputs[0].final_script_witness.is_none());
         // Someone else's input is left alone.
         let (mut p, _) = sweep(&refs, &dest, 1.0).unwrap();
         let other = coin(&k, 5, 1000, 9);
