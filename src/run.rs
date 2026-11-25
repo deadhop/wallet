@@ -92,8 +92,14 @@ async fn main(args: &[String], cfg: Config, shutdown: impl Future<Output = ()>) 
             }
             for s in &state.sweeps {
                 println!(
-                    "{} {} moved {} of {} sat to {} in {}",
-                    s.at, s.mode, s.moved_sat, s.spent_sat, s.to, s.txid
+                    "{} {} moved {} of {} sat to {} in {} ({})",
+                    s.at,
+                    s.mode,
+                    s.moved_sat,
+                    s.spent_sat,
+                    s.to,
+                    s.txid,
+                    s.confirmation.label()
                 );
             }
             Ok(())
@@ -312,6 +318,7 @@ mod tests {
             spent_sat: 2,
             moved_sat: 1,
             to: "a".into(),
+            confirmation: crate::state::Confirmation::Unconfirmed,
         });
         state.save(dir.path()).unwrap();
         assert_eq!(cmd(&["status"], &m).await, ExitCode::SUCCESS);

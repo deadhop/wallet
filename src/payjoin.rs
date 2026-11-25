@@ -289,6 +289,7 @@ pub async fn sweep(s: &mut Sweeper, coins: &[Coin], rate: f64, now: u64) -> Resu
         spent_sat: total.to_sat(),
         moved_sat: moved.to_sat(),
         to: address,
+        confirmation: crate::state::Confirmation::Unconfirmed,
     })
 }
 

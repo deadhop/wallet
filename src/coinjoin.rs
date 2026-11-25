@@ -575,6 +575,7 @@ async fn premix(s: &mut Sweeper, cj: &CoinjoinConfig, coins: &[Coin], rate: f64,
         spent_sat: total.to_sat(),
         moved_sat: mix.to_sat(),
         to: address,
+        confirmation: crate::state::Confirmation::Unconfirmed,
     })
 }
 
@@ -639,6 +640,7 @@ pub async fn round(
         spent_sat: coin.value.to_sat(),
         moved_sat: round.pool.output_sat(),
         to: address,
+        confirmation: crate::state::Confirmation::Unconfirmed,
     })
 }
 

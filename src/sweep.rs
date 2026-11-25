@@ -5,12 +5,16 @@ use bitcoin::sighash::EcdsaSighashType;
 use bitcoin::{Amount, ScriptBuf};
 use deadhop_common::wallet::Wallet as Watch;
 
-use crate::chain::Backend;
+use std::str::FromStr;
+
+use bitcoin::{Address, Txid};
+
+use crate::chain::{Backend, TxStatus};
 use crate::config::{Config, Mode};
 use crate::error::{Error, Result};
 use crate::keys::Keys;
 use crate::scan::{confirmed, read_index, scan};
-use crate::state::{State, Sweep};
+use crate::state::{Confirmation, State, Sweep};
 use crate::tx::{self, Coin, Coins, Rules};
 
 /// What a poll did.
@@ -23,6 +27,11 @@ pub enum Outcome {
     /// Moved out.
     Swept(Sweep),
 }
+
+/// How long a sweep may be unknown to the server before it is abandoned:
+/// long enough that a server still catching up on its mempool is not
+/// mistaken for a dropped transaction.
+pub const ABANDON_AFTER_SECS: u64 = 3_600;
 
 pub struct Sweeper {
     pub cfg: Config,
@@ -106,8 +115,45 @@ impl Sweeper {
         tx::fee(tx::vsize(inputs, outputs), self.cfg.max_fee_rate)
     }
 
+    /// Check every sweep not yet settled against the chain: mined ones are
+    /// confirmed, and one the server has not known for
+    /// [`ABANDON_AFTER_SECS`] is abandoned (its coins are still ours and the
+    /// scan finds them again). Saved when anything changed.
+    pub async fn reconcile(&mut self, now: u64) -> Result<()> {
+        let mut changed = false;
+        for i in 0..self.state.sweeps.len() {
+            let sweep = &self.state.sweeps[i];
+            if sweep.confirmation.settled() {
+                continue;
+            }
+            let (Ok(txid), Some(script)) = (
+                Txid::from_str(&sweep.txid),
+                Address::from_str(&sweep.to)
+                    .ok()
+                    .map(|a| a.assume_checked().script_pubkey()),
+            ) else {
+                continue;
+            };
+            let next = match self.chain.tx_status(txid, &script).await? {
+                TxStatus::Confirmed(height) => Confirmation::Confirmed { height },
+                TxStatus::Missing if now >= sweep.at.saturating_add(ABANDON_AFTER_SECS) => {
+                    tracing::warn!(%txid, "a sweep was never mined and is gone from the server: its coins did not move");
+                    Confirmation::Abandoned
+                }
+                TxStatus::Mempool | TxStatus::Missing => continue,
+            };
+            self.state.sweeps[i].confirmation = next;
+            changed = true;
+        }
+        if changed {
+            self.save()?;
+        }
+        Ok(())
+    }
+
     /// One poll.
     pub async fn tick(&mut self, now: u64) -> Result<Outcome> {
+        self.reconcile(now).await?;
         let found = scan(
             self.chain.as_ref(),
             &self.keys,
@@ -193,6 +239,7 @@ impl Sweeper {
             spent_sat: total.to_sat(),
             moved_sat: (total - fee).to_sat(),
             to: address,
+            confirmation: crate::state::Confirmation::Unconfirmed,
         })
     }
 }
@@ -258,6 +305,9 @@ pub(crate) mod tests {
         async fn has_transaction(&self, txid: bitcoin::Txid) -> Result<bool> {
             self.0.has_transaction(txid).await
         }
+        async fn tx_status(&self, txid: bitcoin::Txid, script: &ScriptBuf) -> Result<TxStatus> {
+            self.0.tx_status(txid, script).await
+        }
     }
 
     pub fn sweeper(dir: &std::path::Path, chain: FakeChain, extra: &[(&'static str, String)]) -> (Sweeper, Shared) {
@@ -304,6 +354,54 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(sent.output[0].script_pubkey, first.script_pubkey());
         assert_ne!(s.destination().unwrap().1, first.to_string());
+    }
+
+    #[tokio::test]
+    async fn sweeps_are_confirmed_or_abandoned_by_what_the_chain_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = keys();
+        let chain = FakeChain {
+            tip: 100,
+            relay: 1.0,
+            ..FakeChain::default()
+        };
+        chain.fund(&k.script(EXTERNAL, 0), 200_000, Some(90));
+        let (mut s, shared) = sweeper(dir.path(), chain, &[]);
+        let Outcome::Swept(first) = s.tick(10).await.unwrap() else { panic!("not swept") };
+        assert_eq!(first.confirmation, Confirmation::Unconfirmed);
+        let txid = Txid::from_str(&first.txid).unwrap();
+        // In the mempool: still unconfirmed, however long it waits.
+        s.reconcile(10 + 2 * ABANDON_AFTER_SECS).await.unwrap();
+        assert_eq!(s.state.sweeps[0].confirmation, Confirmation::Unconfirmed);
+        // Mined: confirmed, on disk too, and never asked about again.
+        shared.0.status.lock().unwrap().insert(txid, TxStatus::Confirmed(101));
+        s.reconcile(20).await.unwrap();
+        let mined = Confirmation::Confirmed { height: 101 };
+        assert_eq!(State::load(dir.path()).unwrap().sweeps[0].confirmation, mined);
+        shared.0.status.lock().unwrap().insert(txid, TxStatus::Missing);
+        s.reconcile(20 + 2 * ABANDON_AFTER_SECS).await.unwrap();
+        assert_eq!(s.state.sweeps[0].confirmation, mined);
+
+        // Dropped without being mined: unconfirmed for a while, then abandoned.
+        let mut dropped = first.clone();
+        dropped.txid = "ab".repeat(32);
+        dropped.at = 1_000;
+        dropped.confirmation = Confirmation::Unconfirmed;
+        s.state.record(dropped);
+        s.reconcile(1_000 + ABANDON_AFTER_SECS - 1).await.unwrap();
+        assert_eq!(s.state.sweeps[1].confirmation, Confirmation::Unconfirmed);
+        s.reconcile(1_000 + ABANDON_AFTER_SECS).await.unwrap();
+        assert_eq!(
+            State::load(dir.path()).unwrap().sweeps[1].confirmation,
+            Confirmation::Abandoned
+        );
+        // An entry that names no transaction or address is left as it is.
+        let mut odd = first.clone();
+        odd.txid = "t".into();
+        odd.confirmation = Confirmation::Unconfirmed;
+        s.state.record(odd);
+        s.reconcile(1_000_000).await.unwrap();
+        assert_eq!(s.state.sweeps[2].confirmation, Confirmation::Unconfirmed);
     }
 
     #[tokio::test]
