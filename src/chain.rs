@@ -31,6 +31,17 @@ pub struct Unspent {
     pub height: Option<u32>,
 }
 
+/// Where a transaction is, as far as the server knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxStatus {
+    /// In a block at this height.
+    Confirmed(u32),
+    /// Waiting in the mempool.
+    Mempool,
+    /// Not known: never seen, or dropped without being mined.
+    Missing,
+}
+
 /// The chain operations the wallet needs. Implemented by [`Electrum`].
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -50,6 +61,8 @@ pub trait Backend: Send + Sync {
     /// Whether the server has the transaction `txid`, in its mempool or in a
     /// block: it answers with the transaction itself, and that is checked.
     async fn has_transaction(&self, txid: Txid) -> Result<bool>;
+    /// Where `txid`, which pays to `script`, is: found in the script's history.
+    async fn tx_status(&self, txid: Txid, script: &ScriptBuf) -> Result<TxStatus>;
 }
 
 fn bad(what: &str) -> Error {
@@ -193,6 +206,28 @@ impl Backend for Electrum {
             .and_then(|h| bitcoin::consensus::encode::deserialize_hex::<Transaction>(h).ok());
         Ok(tx.is_some_and(|t| t.compute_txid() == txid))
     }
+
+    async fn tx_status(&self, txid: Txid, script: &ScriptBuf) -> Result<TxStatus> {
+        let mut budget = BUDGET;
+        let r = self
+            .batch(
+                &[("blockchain.scripthash.get_history", json!([scripthash(script)]))],
+                MAX_LINE_BYTES,
+                &mut budget,
+            )
+            .await?;
+        let history = r[0].as_array().ok_or_else(|| bad("history"))?;
+        let want = txid.to_string();
+        let Some(entry) = history.iter().find(|h| h["tx_hash"].as_str() == Some(want.as_str())) else {
+            return Ok(TxStatus::Missing);
+        };
+        // Electrum reports 0 (or -1, unconfirmed parents) for the mempool.
+        let height = entry["height"].as_i64().ok_or_else(|| bad("height"))?;
+        Ok(match u32::try_from(height).ok().filter(|h| *h > 0) {
+            Some(h) => TxStatus::Confirmed(h),
+            None => TxStatus::Mempool,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +250,9 @@ pub(crate) mod tests {
         pub refuse_with: Option<String>,
         /// Transactions the server has besides those broadcast through it.
         pub known: Mutex<std::collections::HashSet<Txid>>,
+        /// Where transactions are; one broadcast here and not listed is in
+        /// the mempool, any other is missing.
+        pub status: Mutex<HashMap<Txid, TxStatus>>,
         /// Scripts whose unspent list cannot be read.
         pub poisoned: Mutex<std::collections::HashSet<ScriptBuf>>,
     }
@@ -280,6 +318,13 @@ pub(crate) mod tests {
             Ok(self.known.lock().unwrap().contains(&txid)
                 || self.broadcasts.lock().unwrap().iter().any(|t| t.compute_txid() == txid))
         }
+        async fn tx_status(&self, txid: Txid, _script: &ScriptBuf) -> Result<TxStatus> {
+            if let Some(s) = self.status.lock().unwrap().get(&txid) {
+                return Ok(*s);
+            }
+            let sent = self.broadcasts.lock().unwrap().iter().any(|t| t.compute_txid() == txid);
+            Ok(if sent { TxStatus::Mempool } else { TxStatus::Missing })
+        }
     }
 
     /// A scripted Electrum server on 127.0.0.1: `result` per method.
@@ -338,6 +383,10 @@ pub(crate) mod tests {
         assert_eq!(u.len(), 2);
         assert_eq!(u[0].as_ref().unwrap()[0].value, Amount::from_sat(900));
         assert_eq!(e.used(std::slice::from_ref(&script)).await.unwrap(), vec![true]);
+        let known = Txid::from_str(&t).unwrap();
+        assert_eq!(e.tx_status(known, &script).await.unwrap(), TxStatus::Confirmed(300));
+        let other = Txid::from_str(&"cc".repeat(32)).unwrap();
+        assert_eq!(e.tx_status(other, &script).await.unwrap(), TxStatus::Missing);
         assert!((e.fee_rate(6).await.unwrap().unwrap() - 20.0).abs() < 1e-9);
         assert!((e.relay_fee().await.unwrap() - 1.0).abs() < 1e-9);
         // A broadcast answered with some other txid is not believed.
@@ -352,11 +401,23 @@ pub(crate) mod tests {
         let echo = fake_electrum(HashMap::from([
             ("blockchain.transaction.broadcast", json!(tx.compute_txid().to_string())),
             ("blockchain.estimatefee", json!(-1)),
+            (
+                "blockchain.scripthash.get_history",
+                json!([{"tx_hash": "bb".repeat(32), "height": 0}, {"tx_hash": "dd".repeat(32), "height": "x"}]),
+            ),
         ]))
         .await;
         let e = client(&echo);
         assert_eq!(e.broadcast(&tx).await.unwrap(), tx.compute_txid());
         assert_eq!(e.fee_rate(6).await.unwrap(), None, "no estimate");
+        assert_eq!(e.tx_status(known, &script).await.unwrap(), TxStatus::Mempool);
+        let odd = Txid::from_str(&"dd".repeat(32)).unwrap();
+        assert!(e
+            .tx_status(odd, &script)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("malformed"));
 
         // The server has a transaction when it hands back that very one.
         let real = Transaction {
@@ -394,6 +455,7 @@ pub(crate) mod tests {
             broken.used(std::slice::from_ref(&script)).await.err(),
             broken.fee_rate(6).await.err(),
             broken.relay_fee().await.err(),
+            broken.tx_status(known, &script).await.err(),
         ] {
             assert!(err.unwrap().to_string().contains("malformed"));
         }

@@ -14,7 +14,39 @@ pub const HISTORY: usize = 100;
 /// PayJoin URIs remembered as used.
 pub const USED_URIS: usize = 1_000;
 
-/// One completed sweep.
+/// Whether a sweep's transaction made it into a block. A transaction the
+/// server accepted can still be dropped from mempools without being mined:
+/// then the coins never moved and are swept again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confirmation {
+    /// Broadcast, not yet seen in a block. Sweeps recorded before this field
+    /// existed start here and are checked on the next poll.
+    #[default]
+    Unconfirmed,
+    /// Mined at this height.
+    Confirmed { height: u32 },
+    /// Gone from the server without being mined: the coins did not move.
+    Abandoned,
+}
+
+impl Confirmation {
+    /// Whether there is nothing more to find out.
+    pub fn settled(self) -> bool {
+        self != Confirmation::Unconfirmed
+    }
+
+    /// How `status` shows it.
+    pub fn label(self) -> String {
+        match self {
+            Confirmation::Unconfirmed => "unconfirmed".into(),
+            Confirmation::Confirmed { height } => format!("confirmed in block {height}"),
+            Confirmation::Abandoned => "abandoned: never confirmed, the coins did not move".into(),
+        }
+    }
+}
+
+/// One sweep the server accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sweep {
     pub at: u64,
@@ -25,6 +57,8 @@ pub struct Sweep {
     /// Satoshis that reached the destination.
     pub moved_sat: u64,
     pub to: String,
+    #[serde(default)]
+    pub confirmation: Confirmation,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +127,7 @@ mod tests {
             spent_sat: n,
             moved_sat: n,
             to: "x".into(),
+            confirmation: Confirmation::Unconfirmed,
         }
     }
 
@@ -119,5 +154,21 @@ mod tests {
         let not_a_dir = dir.path().join(STATE_FILE).join("x");
         assert!(State::load(&not_a_dir).is_err());
         assert!(s.save(&not_a_dir).is_err());
+    }
+
+    #[test]
+    fn files_from_before_confirmations_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = r#"{"next_destination":1,"next_change":0,"used_payjoin":[],
+            "sweeps":[{"at":1,"mode":"send","txid":"t","spent_sat":2,"moved_sat":1,"to":"a"}]}"#;
+        std::fs::write(State::path(dir.path()), old).unwrap();
+        let s = State::load(dir.path()).unwrap();
+        assert_eq!(s.sweeps[0].confirmation, Confirmation::Unconfirmed);
+        let json = serde_json::to_string(&Confirmation::Confirmed { height: 7 }).unwrap();
+        assert_eq!(json, r#"{"confirmed":{"height":7}}"#);
+        assert!(!Confirmation::Unconfirmed.settled() && Confirmation::Abandoned.settled());
+        assert_eq!(Confirmation::Unconfirmed.label(), "unconfirmed");
+        assert_eq!(Confirmation::Confirmed { height: 7 }.label(), "confirmed in block 7");
+        assert!(Confirmation::Abandoned.label().contains("never confirmed"));
     }
 }
