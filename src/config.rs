@@ -74,6 +74,8 @@ pub struct Config {
     pub min_confirmations: u32,
     pub poll_secs: u64,
     pub gap: u32,
+    /// The most of the payment service's index file that is believed.
+    pub max_index_hint: u32,
     pub payjoin_uri_file: Option<PathBuf>,
     pub payjoin_pins: Option<Vec<[u8; 32]>>,
     /// Proxy for PayJoin requests and CoinJoin relay traffic.
@@ -89,6 +91,7 @@ pub mod bounds {
     pub const MIN_CONFIRMATIONS: (u64, u64) = (1, 100);
     pub const POLL_SECS: (u64, u64) = (10, 86_400);
     pub const GAP: (u64, u64) = (1, 10_000);
+    pub const MAX_INDEX_HINT: (u64, u64) = (1_000, 100_000_000);
     pub const DENOMINATION_SAT: (u64, u64) = (10_000, 2_100_000_000_000_000);
     pub const PEERS: (u64, u64) = (2, 100);
     pub const TIMEOUT_SECS: (u64, u64) = (60, 86_400);
@@ -216,6 +219,11 @@ impl Config {
             min_confirmations: num("DEADHOP_WALLET_MIN_CONFIRMATIONS", 1, bounds::MIN_CONFIRMATIONS)? as u32,
             poll_secs: num("DEADHOP_WALLET_POLL_SECS", 300, bounds::POLL_SECS)?,
             gap: num("DEADHOP_WALLET_GAP", 50, bounds::GAP)? as u32,
+            max_index_hint: num(
+                "DEADHOP_WALLET_MAX_INDEX_HINT",
+                u64::from(crate::scan::MAX_INDEX_HINT),
+                bounds::MAX_INDEX_HINT,
+            )? as u32,
             payjoin_uri_file,
             payjoin_pins,
             proxy,
@@ -264,8 +272,8 @@ mod tests {
         assert_eq!(c.state_dir, PathBuf::from("data"));
         assert_eq!(c.xpub_file, PathBuf::from("data/account.xpub"));
         assert_eq!(
-            (c.threshold_sat, c.max_fee_rate, c.poll_secs, c.gap),
-            (1_000_000, 20.0, 300, 50)
+            (c.threshold_sat, c.max_fee_rate, c.poll_secs, c.gap, c.max_index_hint),
+            (1_000_000, 20.0, 300, 50, crate::scan::MAX_INDEX_HINT)
         );
         assert!(c.index_file.is_none() && c.proxy.is_none() && c.payjoin_pins.is_none());
         assert_eq!(Mode::Coinjoin.label(), "coinjoin");
@@ -281,8 +289,10 @@ mod tests {
             ("DEADHOP_WALLET_STATE_DIR", "/state"),
             ("DEADHOP_INDEX_FILE", "/scan/next-index"),
             ("DEADHOP_WALLET_PROXY", "socks5://127.0.0.1:9050"),
+            ("DEADHOP_WALLET_MAX_INDEX_HINT", "20000000"),
         ]))
         .unwrap();
+        assert_eq!(c.max_index_hint, 20_000_000);
         assert!(c.sweeps());
         assert_eq!(c.mode.label(), "send");
         assert_eq!(c.threshold_sat, 20_000);

@@ -14,19 +14,31 @@ use crate::error::Result;
 use crate::keys::{Keys, EXTERNAL, INTERNAL};
 use crate::tx::Coin;
 
-/// Highest index taken from the payment service's file. That file comes
-/// from the internet-facing service, so a value beyond any real use (the
-/// daily invoice cap allows 2000 a day) is not believed in full.
-pub const MAX_INDEX_HINT: u32 = 10_000_000;
+/// Default for the highest index taken from the payment service's file
+/// (`DEADHOP_WALLET_MAX_INDEX_HINT`). That file comes from the
+/// internet-facing service, so a value beyond any real use is not believed
+/// in full: at this cap a poll asks about at most 2000 batches of addresses.
+pub const MAX_INDEX_HINT: u32 = 1_000_000;
 /// Addresses asked about per round trip of the scan.
 const SCAN_CHUNK: u32 = 1_000;
 
-/// The payment service's next unused index, or 0 when it has not said.
-pub fn read_index(file: Option<&Path>) -> u32 {
-    file.and_then(|f| std::fs::read_to_string(f).ok())
-        .and_then(|t| t.trim().parse::<u32>().ok())
-        .unwrap_or(0)
-        .min(MAX_INDEX_HINT)
+/// The payment service's next unused index, or 0 when it has not said,
+/// never more than `cap`. A value past the cap is clamped and logged: a
+/// runaway index file should be seen, not silently believed or ignored.
+pub fn read_index(file: Option<&Path>, cap: u32) -> u32 {
+    let hint = file
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| t.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if hint > u64::from(cap) {
+        tracing::warn!(
+            hint,
+            cap,
+            "the payment service's index file is past DEADHOP_WALLET_MAX_INDEX_HINT; scanning up to the cap"
+        );
+        return cap;
+    }
+    hint as u32
 }
 
 /// Result of a scan.
@@ -136,14 +148,20 @@ mod tests {
     fn index_file_and_confirmations() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("next-index");
-        assert_eq!(read_index(None), 0);
-        assert_eq!(read_index(Some(&f)), 0);
+        assert_eq!(read_index(None, MAX_INDEX_HINT), 0);
+        assert_eq!(read_index(Some(&f), MAX_INDEX_HINT), 0);
         std::fs::write(&f, "42\n").unwrap();
-        assert_eq!(read_index(Some(&f)), 42);
+        assert_eq!(read_index(Some(&f), MAX_INDEX_HINT), 42);
         std::fs::write(&f, "x").unwrap();
-        assert_eq!(read_index(Some(&f)), 0);
+        assert_eq!(read_index(Some(&f), MAX_INDEX_HINT), 0);
+        // A hostile or runaway file is clamped to the cap, even past u32.
         std::fs::write(&f, "4000000000").unwrap();
-        assert_eq!(read_index(Some(&f)), MAX_INDEX_HINT);
+        assert_eq!(read_index(Some(&f), MAX_INDEX_HINT), MAX_INDEX_HINT);
+        std::fs::write(&f, "99999999999999").unwrap();
+        assert_eq!(read_index(Some(&f), MAX_INDEX_HINT), MAX_INDEX_HINT);
+        std::fs::write(&f, "5000").unwrap();
+        assert_eq!(read_index(Some(&f), 1_000), 1_000);
+        assert_eq!(read_index(Some(&f), 5_000), 5_000);
 
         let k = keys();
         let mut c = crate::tx::tests::coin(&k, 0, 1, 1);
