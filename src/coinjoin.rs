@@ -578,12 +578,19 @@ async fn premix(s: &mut Sweeper, cj: &CoinjoinConfig, coins: &[Coin], rate: f64,
     })
 }
 
-/// Broadcast, accepting that another member may have been first.
+/// Broadcast, accepting that another member may have been first. A refusal
+/// is not read for its wording, which differs between servers: the round
+/// went through exactly when the server has the transaction.
 async fn broadcast(s: &Sweeper, tx: &Transaction) -> Result<bitcoin::Txid> {
     match s.chain.broadcast(tx).await {
         Ok(t) => Ok(t),
-        Err(e) if e.to_string().contains("already") || e.to_string().contains("known") => Ok(tx.compute_txid()),
-        Err(e) => Err(e),
+        Err(e) => {
+            let txid = tx.compute_txid();
+            match s.chain.has_transaction(txid).await {
+                Ok(true) => Ok(txid),
+                _ => Err(e),
+            }
+        }
     }
 }
 
@@ -952,17 +959,34 @@ pub(crate) mod tests {
             input: vec![],
             output: vec![],
         };
-        for (msg, ok) in [
-            ("txn-already-known", true),
-            ("transaction already in block chain", true),
-            ("bad-txns", false),
+        // The outcome follows what the server has, not how it words the
+        // refusal: a novel phrasing of "already known" is still success, and
+        // a refusal that mentions "already" is still a failure when the
+        // transaction is not there.
+        for (msg, there, ok) in [
+            ("txn-already-known", true, true),
+            ("Die Transaktion ist schon da", true, true),
+            ("code -27", true, true),
+            ("transaction already in block chain", false, false),
+            ("known bad", false, false),
+            ("bad-txns", false, false),
         ] {
-            s.chain = Box::new(crate::chain::tests::FakeChain {
+            let chain = crate::chain::tests::FakeChain {
                 refuse_with: Some(msg.into()),
                 ..Default::default()
-            });
-            assert_eq!(broadcast(&s, &tx).await.is_ok(), ok, "{msg}");
+            };
+            if there {
+                chain.known.lock().unwrap().insert(tx.compute_txid());
+            }
+            s.chain = Box::new(chain);
+            match broadcast(&s, &tx).await {
+                Ok(t) => assert!(ok && t == tx.compute_txid(), "{msg}"),
+                Err(e) => assert!(!ok && e.to_string().contains(msg), "{msg}: {e}"),
+            }
         }
+        // Accepted outright: nothing to ask.
+        s.chain = Box::new(crate::chain::tests::FakeChain::default());
+        assert_eq!(broadcast(&s, &tx).await.unwrap(), tx.compute_txid());
     }
 
     #[test]

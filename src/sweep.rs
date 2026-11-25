@@ -255,6 +255,9 @@ pub(crate) mod tests {
         async fn broadcast(&self, tx: &bitcoin::Transaction) -> Result<bitcoin::Txid> {
             self.0.broadcast(tx).await
         }
+        async fn has_transaction(&self, txid: bitcoin::Txid) -> Result<bool> {
+            self.0.has_transaction(txid).await
+        }
     }
 
     pub fn sweeper(dir: &std::path::Path, chain: FakeChain, extra: &[(&'static str, String)]) -> (Sweeper, Shared) {
@@ -291,6 +294,7 @@ pub(crate) mod tests {
         assert_eq!(sent.input.len(), 2);
         assert_eq!(sent.output.len(), 1);
         assert_eq!(sent.output[0].value.to_sat(), sweep.moved_sat);
+        assert!(shared.has_transaction(sent.compute_txid()).await.unwrap());
         // A fresh destination address next time, and the state is on disk.
         assert_eq!(s.state.next_destination, 1);
         assert_eq!(State::load(dir.path()).unwrap().sweeps.len(), 1);
