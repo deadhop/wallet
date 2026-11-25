@@ -47,6 +47,9 @@ pub trait Backend: Send + Sync {
     async fn relay_fee(&self) -> Result<f64>;
     /// Broadcast; returns the txid the server accepted.
     async fn broadcast(&self, tx: &Transaction) -> Result<Txid>;
+    /// Whether the server has the transaction `txid`, in its mempool or in a
+    /// block: it answers with the transaction itself, and that is checked.
+    async fn has_transaction(&self, txid: Txid) -> Result<bool>;
 }
 
 fn bad(what: &str) -> Error {
@@ -175,6 +178,21 @@ impl Backend for Electrum {
             )),
         }
     }
+
+    async fn has_transaction(&self, txid: Txid) -> Result<bool> {
+        let mut budget = MAX_LINE_BYTES;
+        let r = self
+            .batch(
+                &[("blockchain.transaction.get", json!([txid.to_string()]))],
+                MAX_LINE_BYTES,
+                &mut budget,
+            )
+            .await?;
+        let tx = r[0]
+            .as_str()
+            .and_then(|h| bitcoin::consensus::encode::deserialize_hex::<Transaction>(h).ok());
+        Ok(tx.is_some_and(|t| t.compute_txid() == txid))
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +213,8 @@ pub(crate) mod tests {
         pub refuse_broadcast: bool,
         /// Refuse broadcasts with this message.
         pub refuse_with: Option<String>,
+        /// Transactions the server has besides those broadcast through it.
+        pub known: Mutex<std::collections::HashSet<Txid>>,
         /// Scripts whose unspent list cannot be read.
         pub poisoned: Mutex<std::collections::HashSet<ScriptBuf>>,
     }
@@ -255,6 +275,10 @@ pub(crate) mod tests {
             }
             self.broadcasts.lock().unwrap().push(tx.clone());
             Ok(tx.compute_txid())
+        }
+        async fn has_transaction(&self, txid: Txid) -> Result<bool> {
+            Ok(self.known.lock().unwrap().contains(&txid)
+                || self.broadcasts.lock().unwrap().iter().any(|t| t.compute_txid() == txid))
         }
     }
 
@@ -334,6 +358,34 @@ pub(crate) mod tests {
         assert_eq!(e.broadcast(&tx).await.unwrap(), tx.compute_txid());
         assert_eq!(e.fee_rate(6).await.unwrap(), None, "no estimate");
 
+        // The server has a transaction when it hands back that very one.
+        let real = Transaction {
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![bitcoin::TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: script.clone(),
+            }],
+            ..tx.clone()
+        };
+        let other = Transaction {
+            lock_time: bitcoin::absolute::LockTime::from_consensus(7),
+            ..real.clone()
+        };
+        let has = client(
+            &fake_electrum(HashMap::from([(
+                "blockchain.transaction.get",
+                json!(serialize_hex(&real)),
+            )]))
+            .await,
+        );
+        assert!(has.has_transaction(real.compute_txid()).await.unwrap());
+        assert!(
+            !has.has_transaction(other.compute_txid()).await.unwrap(),
+            "another transaction is not this one"
+        );
+        let garbled = client(&fake_electrum(HashMap::from([("blockchain.transaction.get", json!("zz"))])).await);
+        assert!(!garbled.has_transaction(real.compute_txid()).await.unwrap());
+
         // Everything else unset: each reply is malformed.
         let broken = client(&fake_electrum(HashMap::new()).await);
         for err in [
@@ -345,6 +397,8 @@ pub(crate) mod tests {
         ] {
             assert!(err.unwrap().to_string().contains("malformed"));
         }
+        // No transaction in the reply: not there.
+        assert!(!broken.has_transaction(real.compute_txid()).await.unwrap());
     }
 
     #[test]
