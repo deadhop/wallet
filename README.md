@@ -55,6 +55,7 @@ The sweeping wallet. It is a separate binary and container from the payment serv
 | `DEADHOP_WALLET_MIN_CONFIRMATIONS` | `1` | Confirmations a coin needs before it counts |
 | `DEADHOP_WALLET_POLL_SECS` | `300` | Time between polls |
 | `DEADHOP_WALLET_GAP` | `50` | Unused addresses scanned past the last used one |
+| `DEADHOP_WALLET_MAX_INDEX_HINT` | `1000000` | The highest `DEADHOP_INDEX_FILE` value believed (1000 to 100000000). A larger value is clamped and logged, so a runaway or hostile file costs at most this many addresses per poll |
 | `DEADHOP_WALLET_PROXY` | unset | `socks5://…` (e.g. Tor) for PayJoin requests and the CoinJoin relay. Needed for `.onion` endpoints |
 | `DEADHOP_WALLET_PAYJOIN_URI_FILE` | unset | `payjoin` mode: a file with the receiver's `bitcoin:…?pj=…` URI, without an amount. Write a fresh one for every sweep. It decides where the whole balance goes: keep it on the host and mount it read-only |
 | `DEADHOP_WALLET_PAYJOIN_CERT_SHA256` | unset | Pin the receiver's certificate (self-hosted receivers) |

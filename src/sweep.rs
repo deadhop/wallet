@@ -111,7 +111,7 @@ impl Sweeper {
         let found = scan(
             self.chain.as_ref(),
             &self.keys,
-            read_index(self.cfg.index_file.as_deref()),
+            read_index(self.cfg.index_file.as_deref(), self.cfg.max_index_hint),
             self.state.next_change,
             self.cfg.gap,
         )
