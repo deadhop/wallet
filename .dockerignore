@@ -1,0 +1,5 @@
+# Only the wallet's sources go into the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!src

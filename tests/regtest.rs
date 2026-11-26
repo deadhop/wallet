@@ -179,10 +179,9 @@ async fn simple_send_moves_everything_to_a_fresh_address() {
 async fn payjoin_receiver(keys: Keys, coin: deadhop_wallet::tx::Coin) -> (u16, String, tokio::task::JoinHandle<()>) {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let cert =
-        CertificateDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-cert.pem")).unwrap();
+    let cert = CertificateDer::from_pem_slice(include_bytes!("fixtures/proxy-test-cert.pem")).unwrap();
     let fp = deadhop_electrum::fingerprint_hex(cert.as_ref());
-    let key = PrivateKeyDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-key.pem")).unwrap();
+    let key = PrivateKeyDer::from_pem_slice(include_bytes!("fixtures/proxy-test-key.pem")).unwrap();
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .unwrap()

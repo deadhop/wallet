@@ -413,11 +413,9 @@ mod tests {
     async fn https_that_answers(reply: &'static [u8]) -> (u16, [u8; 32]) {
         use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        let cert =
-            CertificateDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-cert.pem")).unwrap();
+        let cert = CertificateDer::from_pem_slice(include_bytes!("../tests/fixtures/proxy-test-cert.pem")).unwrap();
         let pin = deadhop_electrum::parse_fingerprint(&deadhop_electrum::fingerprint_hex(cert.as_ref())).unwrap();
-        let key =
-            PrivateKeyDer::from_pem_slice(include_bytes!("../../server/tests/fixtures/proxy-test-key.pem")).unwrap();
+        let key = PrivateKeyDer::from_pem_slice(include_bytes!("../tests/fixtures/proxy-test-key.pem")).unwrap();
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()
             .unwrap()

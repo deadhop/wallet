@@ -8,14 +8,14 @@ license = "MIT"
 publish = false
 
 [dependencies]
-# The payment service's library: address derivation, the hardened Electrum
-# client, configuration parsing and private-file helpers.
 # The shared crates of the payment service (not the service itself, so no
-# database or MCP server is linked in).
-deadhop-common = { path = "../server/crates/common" }
-deadhop-electrum = { path = "../server/crates/electrum" }
-deadhop-net = { path = "../server/crates/net", default-features = false }
-deadhop-tlspin = { path = "../server/crates/tlspin" }
+# database or MCP server is linked in), from deadhop/server. Cargo.lock pins
+# the commit; move to a newer one with
+#   cargo update -p deadhop-common -p deadhop-electrum -p deadhop-net -p deadhop-tlspin
+deadhop-common = { git = "https://github.com/deadhop/server", branch = "main" }
+deadhop-electrum = { git = "https://github.com/deadhop/server", branch = "main" }
+deadhop-net = { git = "https://github.com/deadhop/server", branch = "main", default-features = false }
+deadhop-tlspin = { git = "https://github.com/deadhop/server", branch = "main" }
 async-trait = "0.1"
 bip39 = { version = "2", default-features = false, features = ["std"] }
 bitcoin = { version = "0.32", default-features = false, features = ["std", "base64", "rand-std"] }

@@ -1,13 +1,10 @@
-# deadhop-wallet, the sweeping wallet. Build context: the repository root
-# (it builds against the payment service's library in server/), with
-# wallet/Dockerfile.dockerignore keeping everything else out.
+# deadhop-wallet, the sweeping wallet. Build context: this repository's root.
+# Cargo fetches the shared crates from deadhop/server at the commit Cargo.lock pins.
 FROM rust:1.99-slim-trixie AS build
 WORKDIR /src
-# Only the shared crates: the wallet does not link the payment service.
-COPY server/crates ./server/crates
-COPY wallet/Cargo.toml wallet/Cargo.lock ./wallet/
-COPY wallet/src ./wallet/src
-RUN cd wallet && cargo build --release --locked --bin deadhop-wallet \
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --locked --bin deadhop-wallet \
  && strip target/release/deadhop-wallet
 
 FROM debian:trixie-slim
@@ -18,7 +15,7 @@ RUN useradd --system --uid 10001 --home-dir /state --shell /usr/sbin/nologin dea
  && install -d -o deadhop -g deadhop -m 0700 /wallet \
  && install -d -o deadhop -g deadhop -m 0755 /wallet-public \
  && install -d -o deadhop -g deadhop -m 0755 /wallet-scan
-COPY --from=build /src/wallet/target/release/deadhop-wallet /usr/local/bin/deadhop-wallet
+COPY --from=build /src/target/release/deadhop-wallet /usr/local/bin/deadhop-wallet
 USER deadhop
 ENV DEADHOP_DATA_DIR=/wallet DEADHOP_WALLET_STATE_DIR=/state
 VOLUME ["/state"]

@@ -96,15 +96,33 @@ poll) and `deadhop-wallet status` (recent sweeps).
 
 ## Tests
 
-The hermetic tests run anywhere. The regtest tests broadcast real transactions on the dev
-stack (`just up`):
+The hermetic tests run anywhere. The regtest tests broadcast real transactions on the development
+stack, which lives in the deadhop workspace (`just up` there):
 - a simple send;
 - a PayJoin with a BIP-78 receiver built on the `payjoin` crate's receiver;
 - the PayJoin fallback;
 - a three-wallet CoinJoin over the private relay.
 
 ```sh
-cd wallet && cargo test                                   # hermetic
+cargo test                                                # hermetic
 DEADHOP_WALLET_REGTEST=1 cargo test --test regtest        # needs `just up`
 DEADHOP_WALLET_REGTEST=1 cargo llvm-cov --all-targets     # coverage
 ```
+
+The guides are at [deadhop.run/docs/wallet](https://deadhop.run/docs/wallet/), with
+[Sweep to your cold wallet](https://deadhop.run/docs/wallet/sweep.html). Their source is in
+[deadhop/site](https://github.com/deadhop/site) under `docs/wallet/`.
+
+## Develop
+
+```sh
+just check    # rustfmt, clippy -D warnings, the hermetic tests
+```
+
+The wallet builds on the shared crates in [deadhop/server](https://github.com/deadhop/server)
+(`crates/common`, `electrum`, `net`, `tlspin`), pinned by `Cargo.lock`. To move to a newer
+commit of them: `just update-server-crates`.
+
+## License
+
+[MIT](LICENSE).
