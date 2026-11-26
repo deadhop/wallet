@@ -330,7 +330,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 [[package]]
 name = "deadhop-common"
 version = "0.1.0"
-source = "git+https://github.com/deadhop/server?branch=main#735bb8aebf20f7715e64d6faaebf4470f2156820"
+source = "git+https://github.com/deadhop/server?branch=main#5f33f943ea603730fdc2988581823855e9cb3a49"
 dependencies = [
  "bip39",
  "bitcoin",
@@ -343,7 +343,7 @@ dependencies = [
 [[package]]
 name = "deadhop-electrum"
 version = "0.1.0"
-source = "git+https://github.com/deadhop/server?branch=main#735bb8aebf20f7715e64d6faaebf4470f2156820"
+source = "git+https://github.com/deadhop/server?branch=main#5f33f943ea603730fdc2988581823855e9cb3a49"
 dependencies = [
  "async-trait",
  "bitcoin",
@@ -360,7 +360,7 @@ dependencies = [
 [[package]]
 name = "deadhop-net"
 version = "0.1.0"
-source = "git+https://github.com/deadhop/server?branch=main#735bb8aebf20f7715e64d6faaebf4470f2156820"
+source = "git+https://github.com/deadhop/server?branch=main#5f33f943ea603730fdc2988581823855e9cb3a49"
 dependencies = [
  "async-wsocket",
  "base64 0.22.1",
@@ -378,7 +378,7 @@ dependencies = [
 [[package]]
 name = "deadhop-tlspin"
 version = "0.1.0"
-source = "git+https://github.com/deadhop/server?branch=main#735bb8aebf20f7715e64d6faaebf4470f2156820"
+source = "git+https://github.com/deadhop/server?branch=main#5f33f943ea603730fdc2988581823855e9cb3a49"
 dependencies = [
  "base64 0.22.1",
  "bitcoin",
