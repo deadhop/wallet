@@ -1,10 +1,25 @@
-# deadhop-wallet
+<div align="center">
 
-The sweeping wallet. It is a separate binary and container from the payment service.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://deadhop.run/docs/mark-fog.svg">
+  <img alt="deadhop mark" src="https://deadhop.run/docs/mark.svg" width="72">
+</picture>
 
-- **It holds the funds** of the wallet the payment service watches.
-- **It moves them out** once the confirmed balance reaches a threshold, to a fresh address of
-  another wallet, in one of three ways:
+# deadhop wallet
+
+The optional sweeper: it moves what a deadhop service received to your cold wallet.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/deadhop/wallet/ci.yml?branch=main&style=for-the-badge&label=ci)](https://github.com/deadhop/wallet/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/deadhop/wallet?style=for-the-badge)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-deadhop.run-e8c547?style=for-the-badge)](https://deadhop.run/docs/wallet/)
+
+</div>
+
+A [deadhop](https://github.com/deadhop/server) service is watch-only: it sees payments arrive
+but cannot spend them. When you let it generate your wallet, the recovery phrase sits on the
+same server, in an offline container. `deadhop-wallet` is the separate process that spends
+from that wallet. Once the confirmed balance reaches a threshold you set, it moves the funds to
+a fresh address of another wallet, in one of three ways:
 
 | Mode | What happens |
 |---|---|
@@ -12,10 +27,55 @@ The sweeping wallet. It is a separate binary and container from the payment serv
 | `payjoin` | A [BIP-78](https://github.com/bitcoin/bips/blob/master/bip-0078.mediawiki) PayJoin with a receiver named by a `bitcoin:` URI that has a `pj=` endpoint. The receiver adds a coin of its own, so the transaction does not show which inputs are whose. |
 | `coinjoin` | A [joinstr](https://docs.joinstr.xyz/protocol/) round over Nostr. The confirmed coins are first consolidated into one premix coin. That coin joins a pool of equal-amount peers, and the mixed output goes to the next destination address. |
 
-## How it fits
+```mermaid
+flowchart LR
+    subgraph host["Your server (Docker Compose)"]
+        W["wallet<br/>offline: no network<br/>keeps the recovery phrase"]
+        S["deadhop<br/>watch-only: account key only"]
+        X["sweeper (deadhop-wallet)<br/>reads the phrase, read-only"]
+    end
+    W -- "account key" --> S
+    W -. "phrase (read-only mount)" .-> X
+    S -- "next unused address index" --> X
+    X -- "balances, broadcast" --> E["Your Electrum server"]
+    X -- "send / PayJoin / CoinJoin" --> D["Your cold wallet's<br/>next fresh address"]
+```
 
-- **The phrase:** the offline `wallet` service (`deadhop wallet serve`) still generates and keeps the
-  recovery phrase. This process reads the phrase, read-only. It never creates one, so a
+A sweep, as the sweeper logs it (regtest):
+
+```text
+$ docker compose --profile sweep logs --no-log-prefix sweeper
+11:52:35  INFO deadhop_wallet::run: holding 0 BTC confirmed and 0.00168000 BTC unconfirmed, below the threshold
+11:53:05  INFO deadhop_wallet::run: holding 0 BTC confirmed and 0.00168000 BTC unconfirmed, below the threshold
+11:53:35  INFO deadhop_wallet::run: send: moved 195273 sat of 203000 to bcrt1qkh5nhkj8an3c7vw8dlzyq4vzk07g90xjte5ah2 in cfdfa7a7…a71028c9
+
+$ docker compose --profile sweep exec sweeper deadhop-wallet status
+1795521215 send moved 195273 of 203000 sat to bcrt1qkh5nhkj8an3c7vw8dlzyq4vzk07g90xjte5ah2 in cfdfa7a7…a71028c9
+```
+
+## Quick start
+
+The sweeper is the `sweeper` service in [deadhop/stack](https://github.com/deadhop/stack)'s
+`compose.yaml`, behind the `sweep` profile. Add three lines to the stack's `.env`:
+
+```sh
+DEADHOP_WALLET_DESTINATION=zpub6…        # your cold wallet's account key
+DEADHOP_WALLET_THRESHOLD_SAT=2000000     # sweep once 0.02 BTC is confirmed (at least 10,000)
+DEADHOP_WALLET_MAX_FEE_RATE=20           # never pay more than 20 sat/vB; wait instead
+```
+
+```sh
+docker compose --profile sweep up -d --build
+docker compose --profile sweep logs sweeper
+```
+
+The destination and limits are read from that file only: nobody can change them over Nostr, the
+dashboard included. The full guide: [Sweep to your cold wallet](https://deadhop.run/docs/wallet/sweep.html).
+
+## How it works
+
+- **The phrase:** the offline `wallet` service (`deadhop wallet serve`) generates and keeps the recovery
+  phrase. This process reads the phrase, read-only. It never creates one, so a
   missing file can never turn into a new, empty wallet.
 - **Startup check:** it refuses to start if the phrase does not belong to the account key the
   payment service watches (`DEADHOP_XPUB_FILE`).
@@ -35,6 +95,33 @@ The sweeping wallet. It is a separate binary and container from the payment serv
   policy in the dashboard is a separate, stored setting and does not drive this process.
 - **State:** `sweeper.json` in `DEADHOP_WALLET_STATE_DIR` records the next destination and
   change index, every PayJoin URI already paid (each is paid once), and the last 100 sweeps.
+
+## When something fails
+
+- **Many coins:** at most 400 inputs go into one transaction, largest first, and a coin worth
+  less than the fee of its own input is left alone. The rest is swept by the next poll.
+
+- **Fees above the cap, no fresh PayJoin URI, a CoinJoin round that does not fill:** the
+  balance stays where it is, and the next poll tries again.
+- **PayJoin receiver unreachable, answering with an error, or sending a proposal that fails a
+  check:** the signed Original is broadcast instead. It is an ordinary payment to the
+  receiver's address, and BIP-78 lets the receiver broadcast it too. The URI counts as used
+  either way.
+- **CoinJoin:** a signature is `ALL|ANYONECANPAY` over every output, so whatever set of inputs
+  ends up combined, this wallet's output gets its amount, or the transaction is invalid. An
+  abandoned round spends nothing.
+
+## Limits of this version
+
+- **joinstr compatibility:** the message flow and field names follow the joinstr spec, but
+  PSBTs are version 0 (the bitcoin library has no version 2), and the LSAG recovery phase is
+  not implemented.
+- **Untested against other implementations:** interoperability with joinstr's Python and
+  Kotlin clients has not been tested. Rounds have only been run between deadhop wallets.
+- **PayJoin version:** PayJoin is BIP-78 (v1) only, with no BIP-77 directory or OHTTP.
+- **Script type:** only P2WPKH (BIP-84) coins.
+- **No CoinJoin fallback:** without enough peers, rounds keep being abandoned. The premix coin
+  stays in the wallet and nothing leaves until a round fills, or you switch the mode.
 
 ## Configuration
 
@@ -67,61 +154,41 @@ The sweeping wallet. It is a separate binary and container from the payment serv
 Commands: `deadhop-wallet run` (the default: poll until stopped), `deadhop-wallet once` (one
 poll) and `deadhop-wallet status` (recent sweeps).
 
-## What happens when something fails
+## Documentation
 
-- **Many coins:** at most 400 inputs go into one transaction, largest first, and a coin worth
-  less than the fee of its own input is left alone. The rest is swept by the next poll.
+The guides are at [deadhop.run/docs/wallet](https://deadhop.run/docs/wallet/). Their source is
+in [deadhop/site](https://github.com/deadhop/site) under `docs/wallet/`; send doc fixes there.
 
-- **Fees above the cap, no fresh PayJoin URI, a CoinJoin round that does not fill:** the
-  balance stays where it is, and the next poll tries again.
-- **PayJoin receiver unreachable, answering with an error, or sending a proposal that fails a
-  check:** the signed Original is broadcast instead. It is an ordinary payment to the
-  receiver's address, and BIP-78 lets the receiver broadcast it too. The URI counts as used
-  either way.
-- **CoinJoin:** a signature is `ALL|ANYONECANPAY` over every output, so whatever set of inputs
-  ends up combined, this wallet's output gets its amount, or the transaction is invalid. An
-  abandoned round spends nothing.
-
-## Limits of this version
-
-- **joinstr compatibility:** the message flow and field names follow the joinstr spec, but
-  PSBTs are version 0 (the bitcoin library has no version 2), and the LSAG recovery phase is
-  not implemented.
-- **Untested against other implementations:** interoperability with joinstr's Python and
-  Kotlin clients has not been tested. Rounds have only been run between deadhop wallets.
-- **PayJoin version:** PayJoin is BIP-78 (v1) only, with no BIP-77 directory or OHTTP.
-- **Script type:** only P2WPKH (BIP-84) coins.
-- **No CoinJoin fallback:** without enough peers, rounds keep being abandoned. The premix coin
-  stays in the wallet and nothing leaves until a round fills, or you switch the mode.
-
-## Tests
-
-The hermetic tests run anywhere. The regtest tests broadcast real transactions on the development
-stack, which lives in the deadhop workspace (`just up` there):
-- a simple send;
-- a PayJoin with a BIP-78 receiver built on the `payjoin` crate's receiver;
-- the PayJoin fallback;
-- a three-wallet CoinJoin over the private relay.
-
-```sh
-cargo test                                                # hermetic
-DEADHOP_WALLET_REGTEST=1 cargo test --test regtest        # needs `just up`
-DEADHOP_WALLET_REGTEST=1 cargo llvm-cov --all-targets     # coverage
-```
-
-The guides are at [deadhop.run/docs/wallet](https://deadhop.run/docs/wallet/), with
-[Sweep to your cold wallet](https://deadhop.run/docs/wallet/sweep.html). Their source is in
-[deadhop/site](https://github.com/deadhop/site) under `docs/wallet/`.
+| Page | What it covers |
+| --- | --- |
+| [Sweep to your cold wallet](https://deadhop.run/docs/wallet/sweep.html) | Turn it on, watch a sweep, what makes it wait |
+| [Sweep with PayJoin](https://deadhop.run/docs/wallet/payjoin.html) | A receiver URI per sweep, and the fallback |
+| [Sweep with CoinJoin](https://deadhop.run/docs/wallet/coinjoin.html) | joinstr rounds over Nostr |
+| [How sweeping works](https://deadhop.run/docs/wallet/how-it-works.html) | Finding the coins, the checks before signing, the state it keeps |
+| [Configuration and commands](https://deadhop.run/docs/wallet/configuration.html) | Every setting, command and test |
 
 ## Develop
 
+Requirements: Rust 1.99 and [`just`](https://github.com/casey/just).
+
 ```sh
-just check    # rustfmt, clippy -D warnings, the hermetic tests
+just check     # rustfmt, clippy -D warnings, the hermetic tests
+just regtest   # the regtest sweeps, with coverage (needs the regtest stack)
 ```
 
+The regtest tests broadcast real transactions: a simple send, a PayJoin with a BIP-78 receiver
+built on the `payjoin` crate's receiver, the PayJoin fallback, and a three-wallet CoinJoin over
+the private relay. They need the regtest stack from
+[deadhop/stack](https://github.com/deadhop/stack) (`just clone`, then `just up`).
+
 The wallet builds on the shared crates in [deadhop/server](https://github.com/deadhop/server)
-(`crates/common`, `electrum`, `net`, `tlspin`), pinned by `Cargo.lock`. To move to a newer
-commit of them: `just update-server-crates`.
+(`crates/common`, `electrum`, `net`, `tlspin`), pinned by `Cargo.lock`; `just update-server-crates`
+moves them to the newest commit.
+
+## Contributing
+
+Issues and pull requests are welcome here. CI runs `just check` on every pull request. Doc
+changes go to [deadhop/site](https://github.com/deadhop/site).
 
 ## License
 
