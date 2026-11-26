@@ -185,6 +185,23 @@ The wallet builds on the shared crates in [deadhop/server](https://github.com/de
 (`crates/common`, `electrum`, `net`, `tlspin`), pinned by `Cargo.lock`; `just update-server-crates`
 moves them to the newest commit.
 
+## Agent skills
+
+This repository ships [agent skills](https://deadhop.run/docs/skills.html) for Claude Code,
+Codex, Cursor and other agents that read `SKILL.md`:
+
+```sh
+npx skills add deadhop/wallet
+```
+
+| Skill | Use it to |
+| --- | --- |
+| `deadhop-wallet-sweep` | turn on the sweeper in deadhop/stack and choose send, PayJoin or CoinJoin, the threshold and the fee cap; read its status |
+| `deadhop-wallet-develop` | change the sweeper: `just check`, the regtest sweeps with `just regtest`, the shared crates from deadhop/server |
+
+Install one with `--skill <name>`. Every deadhop skill is listed on
+[Agent skills](https://deadhop.run/docs/skills.html).
+
 ## Contributing
 
 Issues and pull requests are welcome here. CI runs `just check` on every pull request. Doc

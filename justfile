@@ -5,7 +5,7 @@ check:
     cargo test --locked
 
 # The regtest sweeps (simple send, PayJoin, CoinJoin), with coverage. Needs the
-# development stack from the deadhop workspace (`just up` there).
+# regtest stack from https://github.com/deadhop/stack (`just clone`, then `just up` there).
 regtest:
     DEADHOP_WALLET_REGTEST=1 cargo llvm-cov --all-targets --fail-under-functions 100
 
